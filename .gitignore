@@ -1,0 +1,20 @@
+# binários e artefatos de build
+/build/bin/
+/build/wailsjs/
+/build/demos/
+/build/windows/deps/
+# certificado e chave privada da assinatura do executável: nunca vão para o git
+/build/windows/signing/
+/furito-ts
+*.log
+.DS_Store
+
+# Pacotes de sons do cliente TeamSpeak 3 (da TeamSpeak Systems): não são
+# distribuídos aqui. O app tem os próprios avisos, gerados por código.
+/soundpacks.zip
+
+# anotações de planejamento locais
+/plano.md
+
+# backup do estado anterior à reescrita
+/_backup/
