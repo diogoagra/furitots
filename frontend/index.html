@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Furito TS</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Ícones (desenhos próprios, genéricos) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path fill="currentColor" d="M8 2h2v5H8zM14 2h2v5h-2zM6 7h12v4a6 6 0 0 1-5 5.9V20h3v2H8v-2h3v-3.1A6 6 0 0 1 6 11z"/></symbol>
+    <symbol id="i-redx" viewBox="0 0 12 12"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="#fff" stroke-width="4.4" stroke-linecap="round" fill="none"/><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="#e0242b" stroke-width="2.4" stroke-linecap="round" fill="none"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path fill="currentColor" d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z"/></symbol>
+    <symbol id="i-rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><circle class="rec-dot" cx="12" cy="12" r="5" fill="currentColor"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v7a3 3 0 0 0 3 3z"/><path fill="currentColor" d="M17 11v1a5 5 0 0 1-10 0v-1H5v1a7 7 0 0 0 6 6.9V21H8v2h8v-2h-3v-2.1A7 7 0 0 0 19 12v-1z"/></symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24"><path fill="currentColor" d="M3 9v6h4l5 4V5L7 9z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M15.5 8.5a5 5 0 0 1 0 7M18.3 5.7a9 9 0 0 1 0 12.6"/></symbol>
+    <symbol id="i-fx" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2.3" stroke-linecap="round" fill="none" d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></symbol>
+    <symbol id="i-pads" viewBox="0 0 24 24"><g fill="currentColor"><rect x="2.5" y="5" width="5.4" height="5.4" rx="1.2"/><rect x="9.3" y="5" width="5.4" height="5.4" rx="1.2"/><rect x="16.1" y="5" width="5.4" height="5.4" rx="1.2"/><rect x="2.5" y="13.6" width="5.4" height="5.4" rx="1.2"/><rect x="9.3" y="13.6" width="5.4" height="5.4" rx="1.2"/><rect x="16.1" y="13.6" width="5.4" height="5.4" rx="1.2"/></g></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none" d="M3 6h18M3 12h18M3 18h18"/><g fill="#fff" stroke="currentColor" stroke-width="2"><circle cx="8" cy="6" r="2.4"/><circle cx="16" cy="12" r="2.4"/><circle cx="10" cy="18" r="2.4"/></g></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><g fill="currentColor"><rect x="2" y="4" width="20" height="7" rx="1.5"/><rect x="2" y="13" width="20" height="7" rx="1.5"/></g><g fill="#fff"><circle cx="6" cy="7.5" r="1.2"/><circle cx="6" cy="16.5" r="1.2"/><rect x="10" y="6.7" width="9" height="1.6" rx=".8"/><rect x="10" y="15.7" width="9" height="1.6" rx=".8"/></g></symbol>
+    <symbol id="i-channel" viewBox="0 0 24 24"><path fill="currentColor" d="M4 3.5h16a2 2 0 0 1 2 2v9.5a2 2 0 0 1-2 2h-8l-5 4v-4H4a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2z"/><path d="M6.5 8.2h11M6.5 12h7" stroke="#fff" stroke-width="1.6" stroke-linecap="round" opacity=".85"/></symbol>
+    <symbol id="i-channel-on" viewBox="0 0 24 24"><path fill="currentColor" d="M4 3.5h16a2 2 0 0 1 2 2v9.5a2 2 0 0 1-2 2h-8l-5 4v-4H4a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2z"/><path d="M7.5 10.3l3 3 6-6.2" stroke="#fff" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M4 4.5h16a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 20 16.5h-8l-4.5 3.6v-3.6H4A1.5 1.5 0 0 1 2.5 15V6A1.5 1.5 0 0 1 4 4.5z"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><path fill="currentColor" d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1zm2 0h6V7a3 3 0 0 0-6 0z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M7 12.4l3.3 3.3L17 9" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><rect x="10.9" y="10" width="2.2" height="7.2" rx="1" fill="#fff"/><circle cx="12" cy="7.1" r="1.4" fill="#fff"/></symbol>
+    <symbol id="i-mod" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M7.5 16V8.5l4.5 4.6 4.5-4.6V16" stroke="#fff" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/></symbol>
+    <symbol id="i-note" viewBox="0 0 24 24"><path fill="currentColor" d="M9 4v11.2A3.5 3.5 0 1 0 11 18.5V8h7v5.2a3.5 3.5 0 1 0 2 3.3V4z"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 5.5l6.5 6.5L9 18.5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-caret" viewBox="0 0 10 10"><path d="M1.5 3.5L5 7l3.5-3.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" fill="none"/></symbol>
+    <symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8.7" cy="10" r="1.3" fill="currentColor"/><circle cx="15.3" cy="10" r="1.3" fill="currentColor"/><path d="M7.8 14.2a5 5 0 0 0 8.4 0" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></symbol>
+    <symbol id="i-signal" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M2.5 9.5a14 14 0 0 1 19 0M6 13.2a9 9 0 0 1 12 0M9.4 16.8a4.2 4.2 0 0 1 5.2 0"/><circle cx="12" cy="20" r="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path fill="currentColor" d="M7 19a5 5 0 0 1-.6-9.96A6.5 6.5 0 0 1 18.9 10.6 4.3 4.3 0 0 1 18 19z"/></symbol>
+    <symbol id="i-mic-s" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="7.5" rx="2" fill="#fff"/><path d="M3.8 7.5a4.2 4.2 0 0 0 8.4 0M8 11.7V14" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round"/><path d="M2.5 13.5l11-11" stroke="#e0242b" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-spk-s" viewBox="0 0 16 16"><path d="M2.5 6v4h2.6L8.5 13V3L5.1 6z" fill="#fff"/><path d="M10.6 5.6a3.4 3.4 0 0 1 0 4.8" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round"/><path d="M2.5 13.5l11-11" stroke="#e0242b" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.5l-5.9 3.1 1.2-6.5L2.5 9.5l6.6-.9z"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M3 6h18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zm2 3v2h2V9zm4 0v2h2V9zm4 0v2h2V9zm4 0v2h2V9zM5 13v2h2v-2zm4 0v2h6v-2zm8 0v2h2v-2z"/></symbol>
+    <symbol id="i-screen" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3v2H7v-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm1 2v9h16V6z"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" d="M8.5 7l-5 5 5 5M15.5 7l5 5-5 5M13.6 4.5l-3.2 15"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M10.3 2h3.4l.5 2.6c.6.2 1.2.5 1.7.8l2.3-1.4 2.4 2.4-1.4 2.3c.3.5.6 1.1.8 1.7l2.6.5v3.4l-2.6.5c-.2.6-.5 1.2-.8 1.7l1.4 2.3-2.4 2.4-2.3-1.4c-.5.3-1.1.6-1.7.8l-.5 2.6h-3.4l-.5-2.6c-.6-.2-1.2-.5-1.7-.8l-2.3 1.4-2.4-2.4 1.4-2.3c-.3-.5-.6-1.1-.8-1.7L2 13.7v-3.4l2.6-.5c.2-.6.5-1.2.8-1.7L4 5.8l2.4-2.4 2.3 1.4c.5-.3 1.1-.6 1.7-.8zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path fill="currentColor" d="M3 5.5A1.5 1.5 0 0 1 4.5 4h5l2 2.5h8A1.5 1.5 0 0 1 21 8v10.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M6 3h8l4 4v14H6zM14 3v4h4"/></symbol>
+    <symbol id="i-whisper" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M9 8.5a3 3 0 0 1 6 0c0 2.2-2.2 2.6-2.6 4.6-.3 1.6-1 2.9-2.6 2.9M4.5 10a7.5 7.5 0 0 1 15 0M18 14.5c.9.6 1.5 1.3 1.5 2.2"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" d="M4 5h16v14H4zM4 16l4.5-4.5 3.5 3.5 3-3 5 5M15.5 9.5h.01"/></symbol>
+    <symbol id="i-zz" viewBox="0 0 16 16"><path d="M4 4.5h4.4L4 9.8h4.4M9.6 8.2h3L9.6 12h3" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<div id="app">
+
+  <!-- Barra de ferramentas -->
+  <header id="toolbar" class="toolbar">
+    <button class="tb-btn" id="tbConnect" title="Conectar a um servidor"><svg class="ic"><use href="#i-plug"/></svg></button>
+    <button class="tb-btn has-caret" id="tbBookmarks" title="Favoritos"><svg class="ic"><use href="#i-star"/></svg><svg class="caret"><use href="#i-caret"/></svg></button>
+    <button class="tb-btn" id="tbDisconnect" title="Desconectar do servidor" disabled><svg class="ic"><use href="#i-plug"/></svg><svg class="tb-x on"><use href="#i-redx"/></svg></button>
+    <span class="tb-sep"></span>
+    <button class="tb-btn toggle" id="tbAway" title="Alternar status ausente" disabled><svg class="ic"><use href="#i-moon"/></svg></button>
+    <button class="tb-btn toggle" id="tbMute" title="Mutar microfone"><svg class="ic"><use href="#i-mic"/></svg><svg class="tb-x"><use href="#i-redx"/></svg></button>
+    <button class="tb-btn toggle" id="tbDeafen" title="Mutar alto-falantes"><svg class="ic"><use href="#i-speaker"/></svg><svg class="tb-x"><use href="#i-redx"/></svg></button>
+    <button class="tb-btn toggle" id="tbRecord" title="Gravar a conversa" disabled><svg class="ic"><use href="#i-rec"/></svg><span class="tb-rec-time" id="tbRecordTime"></span></button>
+    <span class="tb-sep"></span>
+    <button class="tb-btn has-caret" id="tbEffects" title="Efeitos de voz"><svg class="ic"><use href="#i-fx"/></svg><svg class="caret"><use href="#i-caret"/></svg></button>
+    <button class="tb-btn has-caret" id="tbSoundboard" title="Soundboard"><svg class="ic"><use href="#i-pads"/></svg><svg class="caret"><use href="#i-caret"/></svg></button>
+    <button class="tb-btn has-caret" id="tbCapture" title="Ajustes de captura (ativação por voz)"><svg class="ic"><use href="#i-sliders"/></svg><svg class="caret"><use href="#i-caret"/></svg></button>
+    <button class="tb-btn toggle" id="tbScreen" title="Compartilhar tela" disabled><svg class="ic"><use href="#i-screen"/></svg></button>
+    <button class="tb-btn" id="tbScripts" title="Scripts (automações)"><svg class="ic"><use href="#i-code"/></svg></button>
+    <button class="tb-btn" id="tbSettings" title="Ajustes"><svg class="ic"><use href="#i-gear"/></svg></button>
+    <button class="tb-btn" id="tbAbout" title="Sobre o Furito TS"><svg class="ic"><use href="#i-info"/></svg></button>
+    <div class="tb-fill"></div>
+    <div class="tb-volume" title="Volume de saída">
+      <svg class="ic"><use href="#i-speaker"/></svg>
+      <input type="range" id="volSlider" min="0" max="100" step="1" value="100" aria-label="Volume de saída">
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="main">
+    <div class="top-split" id="topSplit">
+      <section class="pane tree-pane" id="treePane">
+        <div id="tree" class="box tree" tabindex="0"></div>
+      </section>
+      <div class="splitter splitter-v" id="splitV" title="Arraste para redimensionar"></div>
+      <section class="pane info-pane">
+        <div id="info" class="box info"></div>
+      </section>
+    </div>
+
+    <div class="splitter splitter-h" id="splitH" title="Arraste para redimensionar"></div>
+
+    <div class="bottom" id="bottomPane">
+      <div id="chatViews" class="box chat-views"></div>
+      <div id="tabBar" class="tabbar"></div>
+      <div class="chat-input-row">
+        <input type="text" id="chatInput" placeholder="Insira a mensagem de bate-papo..." maxlength="1024" autocomplete="off" spellcheck="false" disabled>
+        <button class="emoji-btn" id="emojiBtn" title="Emojis" disabled><svg class="ic"><use href="#i-smile"/></svg></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tela compartilhada por outro cliente -->
+  <section id="screenView" class="screen-view" hidden>
+    <div class="sv-head">
+      <svg class="ic"><use href="#i-screen"/></svg>
+      <span id="svTitle" class="sv-title"></span>
+      <span id="svState" class="sv-state"></span>
+      <span class="tb-fill"></span>
+      <button class="btn" id="svMax" type="button">Tela cheia</button>
+      <button class="btn" id="svClose" type="button">Fechar</button>
+    </div>
+    <video id="svVideo" autoplay playsinline muted></video>
+  </section>
+
+  <!-- Barra de status -->
+  <footer class="statusbar">
+    <div class="sb-left">
+      <span id="txIndicator" class="tx" hidden><span class="tx-dot"></span>Transmitindo</span>
+      <button id="whisperIndicator" class="whisper" title="Clique para parar de sussurrar" hidden></button>
+      <button id="screenIndicator" class="whisper screen" title="Clique para parar de compartilhar a tela" hidden></button>
+      <span id="mockBadge" class="mock-badge" hidden>modo demonstração</span>
+    </div>
+    <div class="sb-right">
+      <span id="statusError" class="sb-error"></span>
+      <svg class="ic sb-ic"><use href="#i-cloud"/></svg>
+      <span id="statusText">Desconectado</span>
+      <svg class="ic sb-ic" id="statusSignal"><use href="#i-signal"/></svg>
+    </div>
+  </footer>
+</div>
+
+<!-- Menu: efeitos de voz -->
+<div class="popover menu" id="popEffects" hidden></div>
+
+<!-- Popover: soundboard -->
+<div class="popover" id="popSoundboard" hidden>
+  <div class="pop-title">Soundboard</div>
+  <div class="pads" id="sbPads"></div>
+  <div class="sb-vol">
+    <span class="muted-text small">Volume</span>
+    <input type="range" id="sbVol" min="0" max="100" step="1" value="80" aria-label="Volume do soundboard">
+  </div>
+  <div class="pop-foot">
+    <button class="btn" id="sbAdd" title="MP3, WAV, M4A, AIFF, FLAC, OGG…">Adicionar arquivos…</button>
+    <span id="sbPlaying" class="muted-text"></span>
+    <button class="btn" id="sbStop">Parar</button>
+  </div>
+  <div class="muted-text small sb-hint">Arraste áudios para a janela para adicionar. Passe o mouse num som: o botão de teclado define um atalho (funciona com o app em segundo plano), × remove; clique direito renomeia.</div>
+</div>
+
+<!-- Popover: microfone -->
+<div class="popover" id="popCapture" hidden>
+  <div class="pop-title">Microfone</div>
+  <label class="check"><input type="checkbox" id="optNS"> Supressão de ruído</label>
+  <div class="micmode" id="nsModeRow"><span>Tipo:</span><select id="nsMode" aria-label="Tipo de supressão de ruído">
+    <option value="neural">Neural (RNNoise)</option>
+    <option value="classic">Clássica</option>
+  </select></div>
+  <div class="muted-text small hint" id="nsHint"></div>
+  <label class="check"><input type="checkbox" id="optAGC"> Ganho automático (nivela a sua voz)</label>
+  <label class="check" id="optAECRow"><input type="checkbox" id="optAEC"> Cancelamento de eco do macOS <span class="muted-text small">(para alto-falantes)</span></label>
+  <div class="warn-text small hint" id="speakerHint" hidden>Você está usando alto-falantes: sem o cancelamento de eco, os outros ouvem de volta o que sai deles (vozes e soundboard).</div>
+  <div class="micmode" id="micModeRow" hidden>
+    <span>Modo do microfone: <b id="micModeName">Padrão</b></span>
+    <button class="btn" id="micModeBtn">Escolher…</button>
+  </div>
+  <div class="muted-text small hint" id="aecHint" hidden>Escolha "Isolamento de Voz" para o macOS remover ruído e digitação até enquanto você fala.</div>
+
+  <div class="pop-sub">Quando transmitir</div>
+  <label class="check"><input type="radio" name="vadMode" value="auto"> Detecção de voz <span class="muted-text small">(ignora teclado e ruído)</span></label>
+  <label class="check"><input type="radio" name="vadMode" value="level"> Por volume <span class="muted-text small">(limiar manual)</span></label>
+  <label class="check"><input type="radio" name="vadMode" value="ptt"> Apertar para falar <span class="muted-text small" id="pttKeyInfo"></span></label>
+  <div class="vad">
+    <div class="vad-meter"><div class="vad-fill" id="vadFill"></div></div>
+    <input type="range" id="vadSlider" min="0" max="1000" step="1" value="350" aria-label="Limiar de ativação por voz">
+  </div>
+  <div class="vad-legend">
+    <span id="vadLevelInfo">Limiar: <b id="vadValue">—</b></span>
+    <span id="vadAutoInfo">Voz detectada: <b id="vadProb">0%</b></span>
+    <span id="vadPttInfo" hidden>Segure a tecla para falar</span>
+    <span id="vadGate" class="gate">fechado</span>
+  </div>
+  <label class="check"><input type="checkbox" id="optMicTest"> Testar: ouvir minha voz como os outros ouvem</label>
+
+  <div class="pop-sub">Vozes dos outros</div>
+  <label class="check"><input type="checkbox" id="optNormalize"> Nivelar o volume de quem fala baixo ou alto</label>
+
+  <div class="pop-sub">Avisos sonoros</div>
+  <label class="check"><input type="checkbox" id="optNotify"> Tocar os avisos <span class="muted-text small">(entrou, saiu, conectado, mutado…)</span></label>
+  <div class="micmode" id="notifyPackRow" hidden><span>Pacote:</span><select id="notifyPack"></select></div>
+  <div class="muted-text small hint" id="notifyMissing" hidden>Nenhum pacote de sons disponível: os do app não puderam ser gravados na pasta de dados (o motivo está no furito.log).</div>
+  <div class="micmode"><button class="btn small" id="notifyImport" type="button" title="O app já traz os próprios avisos. Para usar outros, escolha a pasta de um pacote no formato do TeamSpeak 3 (com settings.ini e os .wav).">Importar pacote de sons…</button></div>
+
+  <div class="dev-lines small">
+    <div><span class="muted-text">Entrada:</span> <span id="devIn">—</span></div>
+    <div><span class="muted-text">Saída:</span> <span id="devOut">—</span></div>
+  </div>
+  <div class="warn-text small" id="captureWarn" hidden>Microfone indisponível. Verifique a permissão do microfone nos ajustes de privacidade do sistema.</div>
+</div>
+
+<!-- Popover: emojis -->
+<div class="popover" id="popEmoji" hidden>
+  <div class="emoji-grid" id="emojiGrid"></div>
+</div>
+
+<!-- Menu de contexto -->
+<div class="popover menu" id="ctxMenu" hidden></div>
+
+<!-- Diálogo: conectar -->
+<div class="modal" id="dlgConnect" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlgConnectTitle">
+    <div class="dlg-title" id="dlgConnectTitle">Conectar</div>
+    <form class="dlg-body" id="connectForm" autocomplete="off">
+      <label for="cHost">Endereço do servidor:</label>
+      <input type="text" id="cHost" placeholder="exemplo.com ou 127.0.0.1:9987" spellcheck="false">
+      <label for="cServerPass">Senha do servidor:</label>
+      <input type="password" id="cServerPass">
+      <label for="cNick">Apelido:</label>
+      <input type="text" id="cNick" maxlength="30" spellcheck="false">
+      <label for="cIdentity" id="cIdentityLbl" hidden>Identidade:</label>
+      <select id="cIdentity" hidden></select>
+      <label for="cChannel">Canal padrão:</label>
+      <input type="text" id="cChannel" placeholder="(opcional)" spellcheck="false">
+      <label for="cChannelPass">Senha do canal padrão:</label>
+      <input type="password" id="cChannelPass">
+    </form>
+    <div class="dlg-status">
+      <span class="spinner" id="connectSpinner" hidden></span>
+      <span class="dlg-error" id="connectError"></span>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" id="connectCancel" type="button">Cancelar</button>
+      <button class="btn primary" id="connectOk" type="submit" form="connectForm">Conectar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Diálogo: senha do canal -->
+<div class="modal" id="dlgPassword" hidden>
+  <div class="dialog small" role="dialog" aria-modal="true" aria-labelledby="dlgPasswordTitle">
+    <div class="dlg-title" id="dlgPasswordTitle">Senha do canal</div>
+    <form class="dlg-body one" id="passwordForm" autocomplete="off">
+      <div id="passwordText" class="dlg-text"></div>
+      <input type="password" id="pwInput" placeholder="Senha">
+    </form>
+    <div class="dlg-foot">
+      <button class="btn" id="pwCancel" type="button">Cancelar</button>
+      <button class="btn primary" id="pwOk" type="submit" form="passwordForm">Entrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Diálogo: ajustes -->
+<div class="modal" id="dlgSettings" hidden>
+  <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="dlgSettingsTitle">
+    <div class="dlg-title" id="dlgSettingsTitle">Ajustes</div>
+    <div class="dlg-content settings">
+      <div class="set-col">
+        <div class="set-sec">
+          <div class="set-title">Áudio</div>
+          <div class="set-grid">
+            <label for="setIn">Microfone:</label><select id="setIn"></select>
+            <label for="setOut">Alto-falantes:</label><select id="setOut"></select>
+          </div>
+          <div class="muted-text small" id="setDevNote">Com o cancelamento de eco ligado, o macOS usa sempre os dispositivos padrão do sistema.</div>
+        </div>
+        <div class="set-sec">
+          <div class="set-title">Transmissão</div>
+          <label class="check"><input type="radio" name="vadModeS" value="auto"> Detecção de voz <span class="muted-text small">(ignora teclado e ruído)</span></label>
+          <label class="check"><input type="radio" name="vadModeS" value="level"> Por volume <span class="muted-text small">(limiar no painel do microfone)</span></label>
+          <label class="check"><input type="radio" name="vadModeS" value="ptt"> Apertar para falar</label>
+        </div>
+        <div class="set-sec">
+          <div class="set-title">Atalhos</div>
+          <div class="hk-rows" id="hkRows"></div>
+          <div class="muted-text small" id="hkNote" hidden>Neste sistema os atalhos só funcionam com a janela do app em foco.</div>
+        </div>
+      </div>
+      <div class="set-col">
+        <div class="set-sec">
+          <div class="set-title">Conexão</div>
+          <label class="check"><input type="checkbox" id="setReconnect"> Reconectar automaticamente se a conexão cair</label>
+          <label class="check" title="Desmarcado: a cutucada só toca o aviso sonoro e aparece no registro do servidor."><input type="checkbox" id="setPokePopup"> Abrir uma janela quando alguém me cutucar</label>
+          <div class="set-grid">
+            <label for="setImages" title="Imagens em descrições de canais e de pessoas, na mensagem de boas-vindas e o banner do servidor. Buscar uma imagem mostra o seu endereço IP a quem a hospeda.">Imagens de fora:</label>
+            <select id="setImages">
+              <option value="ask">Só quando eu clicar (ou sempre, nos servidores que eu escolher)</option>
+              <option value="always">Carregar sempre</option>
+              <option value="never">Nunca carregar</option>
+            </select>
+          </div>
+          <div class="set-grid">
+            <label for="setNick">Apelido:</label>
+            <div class="set-row"><input type="text" id="setNick" maxlength="30" spellcheck="false"><button class="btn" id="setNickApply" type="button">Aplicar</button></div>
+          </div>
+        </div>
+        <div class="set-sec">
+          <div class="set-title">Compartilhamento de tela</div>
+          <div class="set-grid">
+            <label for="setStun" title="Descobre o endereço público de cada lado para o vídeo ir direto de um computador ao outro. Vazio = o padrão; “none” = nenhum (só funciona na mesma rede).">Servidor STUN:</label>
+            <input type="text" id="setStun" spellcheck="false" placeholder="padrão: stun.l.google.com">
+            <label for="setTurn" title="Opcional. Por ele passa o vídeo quando a conexão direta não é possível.">Retransmissão (TURN):</label>
+            <input type="text" id="setTurn" spellcheck="false" placeholder="turn:servidor:3478 (opcional)">
+            <label for="setTurnUser">Usuário / senha:</label>
+            <div class="set-row"><input type="text" id="setTurnUser" spellcheck="false" autocomplete="off"><input type="password" id="setTurnPass" autocomplete="new-password" placeholder="(mantida)"></div>
+          </div>
+          <label class="check"><input type="checkbox" id="setRelayOnly"> Esconder meu IP: mandar o vídeo só pela retransmissão</label>
+          <div class="set-row wrap"><button class="btn" id="setScreenSave" type="button">Salvar</button></div>
+        </div>
+        <div class="set-sec">
+          <div class="set-title">Identidades</div>
+          <div class="list-box id-list" id="setIdList"></div>
+          <div class="set-grid">
+            <span>UID:</span><span id="setUid" class="sel">—</span>
+            <span id="setSrvUidLbl" hidden title="Servidores TeamSpeak 6 identificam você por um código mais longo, calculado a partir da mesma identidade.">Neste servidor:</span><span id="setSrvUid" class="sel" hidden></span>
+            <span>Nível de segurança:</span>
+            <div class="set-row"><b id="setLevel">—</b><button class="btn" id="setImprove" type="button">Aumentar…</button></div>
+          </div>
+          <div class="set-row wrap">
+            <button class="btn" id="setIdNew" type="button">Nova…</button>
+            <button class="btn" id="setImport" type="button">Importar…</button>
+            <button class="btn" id="setIdEdit" type="button">Renomear…</button>
+            <button class="btn" id="setIdDefault" type="button">Tornar padrão</button>
+            <button class="btn" id="setExport" type="button">Exportar…</button>
+            <button class="btn" id="setIdDelete" type="button">Apagar</button>
+          </div>
+          <div class="set-row wrap">
+            <button class="btn" id="setPrivKey" type="button">Usar chave de privilégio…</button>
+          </div>
+        </div>
+        <div class="set-sec">
+          <div class="set-title">Histórico</div>
+          <button class="btn" id="setClearHistory" type="button">Apagar histórico de conversas</button>
+        </div>
+      </div>
+    </div>
+    <div class="dlg-status">
+      <span class="spinner" id="setSpinner" hidden></span>
+      <span class="dlg-error" id="setError"></span>
+      <span class="dlg-ok" id="setInfo"></span>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn primary" id="setClose" type="button">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Diálogo: sobre -->
+<div class="modal" id="dlgAbout" hidden>
+  <div class="dialog about" role="dialog" aria-modal="true" aria-labelledby="dlgAboutTitle">
+    <div class="dlg-title" id="dlgAboutTitle">Sobre</div>
+    <div class="dlg-content">
+      <div class="about-head">
+        <img class="about-icon" src="icon.png" alt="" width="72" height="72">
+        <div>
+          <div class="about-name">Furito TS</div>
+          <div class="about-version" id="aboutVersion"></div>
+          <div class="about-author" id="aboutAuthor"></div>
+        </div>
+      </div>
+      <p class="about-text">Cliente de voz com a aparência do TeamSpeak 3 clássico, compatível com servidores TeamSpeak 3 e TeamSpeak 6.</p>
+      <div class="about-sec">
+        <div class="set-title">Licença</div>
+        <p>Software livre, distribuído sob a licença MIT.</p>
+      </div>
+      <div class="about-sec">
+        <div class="set-title">Feito com</div>
+        <ul class="about-list">
+          <li><b>RNNoise</b> — supressão de ruído <span class="muted-text">(Xiph.Org, licença BSD)</span></li>
+          <li><b>Opus</b> — codec de voz <span class="muted-text">(Xiph.Org, licença BSD)</span></li>
+          <li><b>Wails</b> — janela nativa <span class="muted-text">(licença MIT)</span></li>
+          <li><b>miniaudio</b> — captura e reprodução de áudio</li>
+        </ul>
+      </div>
+      <p class="muted-text small about-note">Projeto independente, sem vínculo com a TeamSpeak Systems GmbH. “TeamSpeak” é marca registrada da TeamSpeak Systems GmbH.</p>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn primary" id="aboutClose" type="button">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<script src="bridge.js"></script>
+<script src="screen.js"></script>
+<script src="scripts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
