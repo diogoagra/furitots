@@ -4,8 +4,10 @@
 package audio
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +57,16 @@ const (
 	maxStreams   = 128
 	stableFrames = 500 // 10 s sem falha para o buffer adaptativo encolher
 	DefaultVAD   = 600.0
+	// Sensibilidade da detecção de voz (SetVADFloor): com a fala em andamento
+	// (até 600 ms depois da voz) o piso cai à metade, para uma palavra dita mais
+	// baixo no meio da frase não ficar de fora.
+	floorRecent = 0.5
+	// Calibração (CalibrateVoice): o nível da voz é o percentil 75 dos quadros
+	// com voz — se a TV falar nas pausas de quem calibra, não puxa a medida para
+	// baixo — e o piso fica 12 dB abaixo dele. É preciso 1 s de voz.
+	calibPercentile = 0.75
+	calibRatio      = 0.25
+	calibMinFrames  = 50
 
 	VADAuto  = "auto"  // detecção de voz (ruído e teclado não abrem o microfone)
 	VADLevel = "level" // abre quando o volume passa do limiar
@@ -90,6 +102,7 @@ type Engine struct {
 	effect          VoiceEffect
 	vadMode         string
 	vadThreshold    float64
+	vadFloor        float64 // detecção de voz: nível mínimo para abrir o microfone (0 = sem piso)
 	volume          float64
 	noiseMode       string // NoiseOff, NoiseClassic ou NoiseNeural
 	autoGain        bool
@@ -117,6 +130,7 @@ type Engine struct {
 	tailAlive  bool      // o som que veio depois da voz ainda não parou
 	fricative  bool      // no meio de um "s"/"f"/"ch"
 	prevPass   bool
+	floor      float64                                    // o piso de sensibilidade em vigor neste quadro (0 fora da detecção de voz)
 	onset      bool                                       // modo neural: o trecho de fala começou e a rede ainda não reconheceu a voz
 	plainMix   float64                                    // modo neural: quanto do último quadro enviado era o áudio clássico (0 a 1; -1 = trecho começando)
 	onQueue    func(seq int, whole bool, audio []float64) // testes: quadro do microfone posto na fila de envio
@@ -140,6 +154,10 @@ type Engine struct {
 	micLevel  atomic.Uint64 // float64 em bits
 	voiceProb atomic.Uint64 // idem
 	txTalking atomic.Bool
+
+	// medida da voz para a sensibilidade (CalibrateVoice)
+	calMu sync.Mutex
+	cal   *calibration // a medida em andamento, ou nil
 
 	// recepção
 	rxMu        sync.Mutex
@@ -278,6 +296,76 @@ func (e *Engine) VADMode() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.vadMode
+}
+
+// SetVADFloor define a sensibilidade da detecção de voz: o nível (na escala do
+// medidor do microfone) que a voz precisa atingir para abrir o microfone. O que
+// fica abaixo — a TV, alguém conversando no cômodo, um ruído distante — não
+// abre, por mais que pareça voz. Zero desliga o piso. Só vale no modo VADAuto;
+// depois de aberto, o microfone segue a fala normalmente (sílabas fracas e
+// finais de frase passam).
+func (e *Engine) SetVADFloor(v float64) {
+	switch {
+	case !(v > 0): // inclui NaN
+		v = 0
+	case v < 50:
+		v = 50
+	case v > 8000:
+		v = 8000
+	}
+	e.mu.Lock()
+	e.vadFloor = v
+	e.mu.Unlock()
+}
+
+func (e *Engine) VADFloor() float64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.vadFloor
+}
+
+// calibration junta o nível dos quadros com voz enquanto a pessoa fala.
+type calibration struct {
+	levels []float64
+}
+
+// ErrNoVoice: a calibração não ouviu voz suficiente para medir.
+var ErrNoVoice = errors.New("não ouvi voz suficiente para calibrar")
+
+// BeginCalibration começa a medir a voz de quem fala ao microfone. Enquanto a
+// medida dura nada é transmitido: quem calibra fala sozinho.
+func (e *Engine) BeginCalibration() {
+	e.calMu.Lock()
+	e.cal = &calibration{}
+	e.calMu.Unlock()
+}
+
+// EndCalibration encerra a medida e devolve o nível da voz e o piso de
+// sensibilidade sugerido para ela (SetVADFloor). Sem pelo menos 1 s de voz
+// devolve ErrNoVoice.
+func (e *Engine) EndCalibration() (voice, floor float64, err error) {
+	e.calMu.Lock()
+	cal := e.cal
+	e.cal = nil
+	e.calMu.Unlock()
+	if cal == nil || len(cal.levels) < calibMinFrames {
+		return 0, 0, ErrNoVoice
+	}
+	sort.Float64s(cal.levels)
+	voice = cal.levels[int(calibPercentile*float64(len(cal.levels)-1))]
+	floor = math.Min(8000, math.Max(50, math.Round(voice*calibRatio)))
+	return voice, floor, nil
+}
+
+// CalibrateVoice mede a voz durante d (BeginCalibration … EndCalibration). A
+// captura precisa estar ligada.
+func (e *Engine) CalibrateVoice(d time.Duration) (voice, floor float64, err error) {
+	e.BeginCalibration()
+	select {
+	case <-time.After(d):
+	case <-e.stop:
+	}
+	return e.EndCalibration()
 }
 
 // SetNoiseMode escolhe a supressão de ruído do microfone: NoiseNeural
@@ -786,6 +874,10 @@ func (e *Engine) txFrame(mic []int16) {
 	e.mu.Lock()
 	muted, effect, mode, threshold := e.muted, e.effect, e.vadMode, e.vadThreshold
 	noise, autoGain, micTest, deafened := e.noiseMode, e.autoGain, e.micTest, e.deafened
+	e.floor = 0
+	if mode == VADAuto {
+		e.floor = e.vadFloor
+	}
 	e.mu.Unlock()
 
 	sb, sbLocal := e.soundboard.GetNextChunk(FrameSize)
@@ -807,6 +899,17 @@ func (e *Engine) txFrame(mic []int16) {
 			slot.plain, slot.sure = append([]float64(nil), e.vp.Plain()...), feat.Sure
 			slot.unheard = feat.Neural < neuralHeard
 		}
+
+		// Calibração em andamento: guarda o nível dos quadros com voz e segura a
+		// transmissão (o detector segue rodando, é dele que vem a medida).
+		e.calMu.Lock()
+		if e.cal != nil {
+			muted = true
+			if feat.Speech {
+				e.cal.levels = append(e.cal.levels, feat.Level)
+			}
+		}
+		e.calMu.Unlock()
 
 		e.micLevel.Store(math.Float64bits(feat.Level))
 		prob := 0.6 * e.VoiceProbability()
@@ -1230,13 +1333,23 @@ func (e *Engine) confirmSpeech() {
 	// A voz que abre o microfone é a parte forte da sílaba. Se os quadros com
 	// voz são só o resto fraco de uma pancada que veio antes deles, é a
 	// ressonância de uma tecla morrendo, não uma vogal começando.
-	if (voiced >= 3 || short) && last.level >= 0.35*peak && peak >= confirmMinPeak*top {
+	if (voiced >= 3 || short) && last.level >= 0.35*peak && peak >= confirmMinPeak*top && peak >= e.openFloor() {
 		for i := from; i < n; i++ {
 			if e.ring[i].voiced {
 				e.ring[i].confirmed = true
 			}
 		}
 	}
+}
+
+// openFloor é o nível que a voz precisa atingir para abrir o microfone agora:
+// o piso de sensibilidade (SetVADFloor), ou a metade dele com a fala em
+// andamento.
+func (e *Engine) openFloor() float64 {
+	if e.sinceVoice <= maxTailFrames {
+		return e.floor * floorRecent
+	}
+	return e.floor
 }
 
 // decide diz se o quadro mais antigo da janela deve ser transmitido.
@@ -1303,7 +1416,7 @@ func (e *Engine) decide(cur *txSlot, mode string) bool {
 	}
 	if len(e.ring) >= 2 && hiss(cur, 8, 0.55) && hiss(&e.ring[0], 8, 0.45) && hiss(&e.ring[1], 8, 0.45) {
 		a, b, c := cur.level, e.ring[0].level, e.ring[1].level
-		if lo := math.Min(a, math.Min(b, c)); lo > 0 && lo >= 0.3*math.Max(a, math.Max(b, c)) {
+		if lo, hi := math.Min(a, math.Min(b, c)), math.Max(a, math.Max(b, c)); lo > 0 && lo >= 0.3*hi && hi >= e.openFloor() {
 			e.fricative = true
 			e.sinceHiss = 0
 			return true

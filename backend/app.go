@@ -96,9 +96,11 @@ type App struct {
 	iconWait map[uint32]chan struct{}
 	avatars  map[string]string // uid + marca do avatar → data URL ("" = falhou nesta conexão); protegido por iconMu
 	selfID   atomic.Uint32
-	dirty    chan struct{}
-	stop     chan struct{}
-	stopOnce sync.Once
+	// calibrating: uma medida da voz (API.CalibrateVoice) está em andamento.
+	calibrating atomic.Bool
+	dirty       chan struct{}
+	stop        chan struct{}
+	stopOnce    sync.Once
 
 	mu          sync.Mutex
 	status      string
@@ -209,6 +211,7 @@ func NewApp(opts Options) (*App, error) {
 	}
 	a.engine.SetEffect(audio.VoiceEffect(a.settings.Effect))
 	a.engine.SetVADThreshold(a.settings.VADThreshold)
+	a.engine.SetVADFloor(a.settings.VADFloor)
 	a.engine.SetVADMode(a.settings.VADMode)
 	a.engine.SetVolume(a.settings.OutputVolume)
 	a.engine.SetNoiseMode(a.settings.noiseMode())
@@ -697,6 +700,7 @@ func (a *App) buildState() State {
 			Effects:                   audio.Effects(),
 			VADMode:                   a.engine.VADMode(),
 			VADThreshold:              a.engine.VADThreshold(),
+			VADFloor:                  a.engine.VADFloor(),
 			NoiseSuppression:          a.settings.NoiseSuppression,
 			NoiseMode:                 a.settings.NoiseMode,
 			AutoGain:                  a.engine.AutoGain(),
@@ -942,6 +946,9 @@ type Settings struct {
 	VADThreshold   float64 `json:"vadThreshold"`
 	OutputVolume   float64 `json:"outputVolume"`
 
+	// VADFloor: sensibilidade da detecção de voz — o nível que a voz precisa
+	// atingir para abrir o microfone. 0 = sem piso.
+	VADFloor         float64        `json:"vadFloor"`
 	VADMode          string         `json:"vadMode"`
 	NoiseSuppression bool           `json:"noiseSuppression"` // ligada ou desligada
 	NoiseMode        string         `json:"noiseMode"`        // o tipo, quando ligada: neural (RNNoise) | classic
@@ -1029,6 +1036,9 @@ func loadSettings(path string) Settings {
 	}
 	if s.VADThreshold < 50 || s.VADThreshold > 8000 {
 		s.VADThreshold = audio.DefaultVAD
+	}
+	if !(s.VADFloor > 0) || s.VADFloor > 8000 { // negativo, NaN ou fora da escala: sem piso
+		s.VADFloor = 0
 	}
 	if s.OutputVolume < 0 || s.OutputVolume > 100 {
 		s.OutputVolume = 100

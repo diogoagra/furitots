@@ -268,6 +268,10 @@ a.lnk:focus-visible { outline: 1px dotted currentColor; outline-offset: 1px; }
 .vad-fill.open { background: #24b23b; }
 .vad input { position: absolute; left: 0; right: 0; top: 0; width: 100%; }
 .vad-legend { display: flex; justify-content: space-between; margin: 4px 0 8px; }
+.micmode.vad-floor, .hint.vad-floor { margin-left: 0; }
+.hint.vad-floor { margin-bottom: 4px; }
+.hint.vad-floor.busy { color: #116b20; }
+.hint.vad-floor.failed { color: var(--err); }
 .gate { padding: 0 7px; border-radius: 8px; background: #e3e3e7; color: #555; font-size: 11px; line-height: 17px; }
 .gate.open { background: #d5f3da; color: #116b20; }
 .dev-lines { margin-top: 8px; display: grid; gap: 2px; }

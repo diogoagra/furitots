@@ -879,6 +879,123 @@ func farVoice(src []float64, rng *rand.Rand) []float64 {
 	return far[:len(far)/FrameSize*FrameSize]
 }
 
+// Avaliação da sensibilidade da detecção de voz (não roda por padrão):
+//
+//	FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalSensitivity -v
+//
+// Cada gravação é calibrada como no app ("Calibrar com a minha voz", falando a
+// um nível normal) e depois medida sem piso e com o piso calibrado:
+//
+//   - o que o piso custa a quem calibrou: frases com o começo cortado falando
+//     no nível da calibração, 6 dB e 11 dB mais baixo;
+//   - o que ele segura: quanto tempo uma voz de fundo (as mesmas gravações, de
+//     longe) mantém o microfone aberto, de 6 a 26 dB abaixo da voz calibrada.
+//
+// É daqui que sai a folga da calibração (calibRatio): mais apertada corta quem
+// fala um pouco mais baixo; mais frouxa deixa a TV passar.
+func TestEvalSensitivity(t *testing.T) {
+	if os.Getenv("FURITO_SPEECH") == "" {
+		t.Skip("defina FURITO_SPEECH com gravações de fala")
+	}
+	paths := strings.Split(os.Getenv("FURITO_SPEECH"), ",")
+	const normal = 2500
+	floors := make([]float64, len(paths))
+	var src []float64
+	var meanFloor float64
+	for i, p := range paths {
+		x := loadFloat(t, p)
+		src = append(src, x...)
+		x = x[:len(x)/FrameSize*FrameSize]
+		scaleActive(x, normal)
+		rng := rand.New(rand.NewSource(9))
+		for j := range x {
+			x[j] += rng.NormFloat64() * 40
+		}
+		e, err := newEngine(func([]byte) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.BeginCalibration()
+		traceTx(e, x)
+		voice, floor, err := e.EndCalibration()
+		e.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		floors[i] = floor
+		meanFloor += floor / float64(len(paths))
+		t.Logf("calibração de %s: voz %.0f, piso %.0f", filepath.Base(p), voice, floor)
+	}
+
+	for _, cond := range []struct {
+		name          string
+		speech, noise float64
+	}{
+		{"no nível da calibração, sala quieta", normal, 40},
+		{"no nível da calibração, ventilador", normal, 250},
+		{"6 dB mais baixo, sala quieta", normal / 2, 40},
+		{"6 dB mais baixo, ventilador", normal / 2, 250},
+		{"11 dB mais baixo, sala quieta", normal * 0.28, 40},
+	} {
+		for _, on := range []bool{false, true} {
+			var all edgeStats
+			for i, p := range paths {
+				pcm, err := DecodeAudioFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				floor := 0.0
+				if on {
+					floor = floors[i]
+				}
+				all.merge(evalEdges(t, pcm, cond.speech, cond.noise, func(e *Engine) { e.SetVADFloor(floor) }))
+			}
+			label := "sem piso"
+			if on {
+				label = "calibrado"
+			}
+			om, _ := meanWorst(all.openLate, true)
+			ham, _ := meanWorst(all.headAudio, false)
+			lm, _ := meanWorst(all.holeMs, true)
+			t.Logf("%-36s %-9s %d frases | abre %+4.0f ms, %2d com o começo cortado | começo %+5.1f dB | %2d com o fim cortado | buracos %3.0f ms/frase",
+				cond.name, label, all.sentences, om, countIf(all.openLate, func(x float64) bool { return x > 5 }), ham,
+				countIf(all.closeLate, func(x float64) bool { return x < -5 }), lm)
+		}
+	}
+
+	rng := rand.New(rand.NewSource(3))
+	far := farVoice(src, rng)
+	for _, db := range []float64{-6, -10, -14, -20, -26} {
+		x := append([]float64(nil), far...)
+		scaleActive(x, normal*math.Pow(10, db/20))
+		for i := range x {
+			x[i] += rng.NormFloat64() * 40
+		}
+		line := fmt.Sprintf("voz de fundo %2.0f dB abaixo da voz calibrada: microfone aberto", -db)
+		for _, floor := range []float64{0, meanFloor} {
+			e, err := newEngine(func([]byte) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.SetVADFloor(floor)
+			weight, _, _ := traceTx(e, x)
+			e.Close()
+			var open float64
+			for _, w := range weight {
+				if w > 0 {
+					open++
+				}
+			}
+			label := "sem piso"
+			if floor > 0 {
+				label = "calibrado"
+			}
+			line += fmt.Sprintf(" | %s %2.0f%% do tempo", label, 100*open/float64(len(x)))
+		}
+		t.Log(line)
+	}
+}
+
 // loadFloat lê uma gravação (48 kHz, mono) na escala de 16 bits.
 func loadFloat(t *testing.T, path string) []float64 {
 	t.Helper()

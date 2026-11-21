@@ -305,7 +305,7 @@
       groups: { server: [], channel: [] },
       bookmarks: [],
       hotkeys: { ptt: '', toggleMute: '', toggleDeafen: '', soundStop: '', global: false, errors: {} },
-      audio: { effect: 'normal', effects: [], vadMode: 'auto', vadThreshold: 300, noiseSuppression: true, noiseMode: 'neural', autoGain: true, echoCancellation: false, echoCancellationAvailable: true, normalizeVoices: true, micTest: false, micMode: '', outputVolume: 100, soundboardVolume: 80, soundboardPlaying: false, sounds: [], captureAvailable: true, inputDevice: '', outputDevice: '', notifySounds: true, notifyPack: '', notifyPacks: [], inputDevices: [], outputDevices: [], inputChoice: '', outputChoice: '' },
+      audio: { effect: 'normal', effects: [], vadMode: 'auto', vadThreshold: 300, vadFloor: 0, noiseSuppression: true, noiseMode: 'neural', autoGain: true, echoCancellation: false, echoCancellationAvailable: true, normalizeVoices: true, micTest: false, micMode: '', outputVolume: 100, soundboardVolume: 80, soundboardPlaying: false, sounds: [], captureAvailable: true, inputDevice: '', outputDevice: '', notifySounds: true, notifyPack: '', notifyPacks: [], inputDevices: [], outputDevices: [], inputChoice: '', outputChoice: '' },
     };
   }
   function normalize(s) {
@@ -1068,7 +1068,13 @@
   const VAD_MIN = 50, VAD_MAX = 8000, VAD_LOG = Math.log(VAD_MAX / VAD_MIN);
   const vadPos = (v) => clamp(Math.log(Math.max(v, 1) / VAD_MIN) / VAD_LOG, 0, 1);
   const vadFromPos = (p) => Math.round(VAD_MIN * Math.exp(clamp(p, 0, 1) * VAD_LOG));
-  let vadBusyUntil = 0, volBusyUntil = 0;
+  let vadBusyUntil = 0, volBusyUntil = 0, floorBusyUntil = 0;
+  // Sensibilidade da detecção de voz: o controle vai de "sem mínimo" (na ponta
+  // esquerda) até o topo da escala do medidor.
+  const floorPos = (v) => (v > 0 ? vadPos(v) : 0);
+  const floorFromPos = (p) => (p <= 0 ? 0 : vadFromPos(p));
+  const CALIBRATION_SECONDS = 5;
+  let calibration = null; // { left, timer } durante a medida; { text, failed, until } logo depois
   // Ícones padrão do TeamSpeak (grupos de canal e de servidor), desenhados aqui.
   const BUILTIN_ICON = {
     100: ['CA', '#b03a2e', 'Channel Admin'], 200: ['O', '#ca6f1e', 'Operator'], 300: ['SA', '#7b241c', 'Server Admin'],
@@ -1275,6 +1281,9 @@
     $('optMicTest').checked = !!au.micTest;
     document.querySelectorAll('input[name="vadMode"]').forEach((r) => { r.checked = r.value === vadMode; });
     $('vadSlider').hidden = vadMode !== 'level';
+    $('vadFloorSlider').hidden = vadMode !== 'auto';
+    $('vadFloorRow').hidden = vadMode !== 'auto';
+    renderFloor(vadMode === 'auto');
     $('vadLevelInfo').hidden = vadMode !== 'level';
     $('vadAutoInfo').hidden = vadMode !== 'auto';
     $('vadPttInfo').hidden = vadMode !== 'ptt';
@@ -1313,6 +1322,49 @@
     $('statusSignal').classList.toggle('off', !on);
     updateChatInput();
     renderMeter();
+  }
+
+  // renderFloor mostra a sensibilidade da detecção de voz e o que a calibração
+  // está fazendo (ou acabou de fazer).
+  function renderFloor(shown) {
+    const floor = Math.round(Number(state.audio.vadFloor) || 0);
+    if (Date.now() > floorBusyUntil) {
+      $('vadFloorSlider').value = String(Math.round(floorPos(floor) * 1000));
+      $('vadFloorValue').textContent = floor > 0 ? String(floor) : 'sem mínimo';
+    }
+    const busy = !!(calibration && calibration.timer);
+    const btn = $('vadCalibrate');
+    btn.disabled = busy;
+    btn.textContent = busy ? 'Ouvindo… ' + calibration.left + ' s' : 'Calibrar com a minha voz';
+    $('vadFloorSlider').disabled = busy;
+    const hint = $('vadFloorHint');
+    const note = calibration && !busy && Date.now() < calibration.until ? calibration : null;
+    // A linha de texto só aparece durante a medida e logo depois dela; o que o
+    // controle faz está na dica do rótulo.
+    hint.hidden = !shown || !(busy || note);
+    hint.classList.toggle('busy', busy);
+    hint.classList.toggle('failed', !!(note && note.failed));
+    hint.textContent = busy ? 'Fale normalmente. Nada é transmitido durante a medida.' : note ? note.text : '';
+  }
+
+  async function calibrateVoice() {
+    if (calibration && calibration.timer) return;
+    const tick = () => { calibration.left = Math.max(0, calibration.left - 1); renderFloor(true); };
+    calibration = { left: CALIBRATION_SECONDS, timer: 0 };
+    calibration.timer = setInterval(tick, 1000);
+    renderFloor(true);
+    let note;
+    try {
+      const res = await call('CalibrateVoice');
+      note = { text: 'Sua voz ficou em ' + Math.round(res.voice) + '; o mínimo, em ' + Math.round(res.floor) + '.', failed: false };
+    } catch (e) {
+      note = { text: errText(e), failed: true };
+    }
+    clearInterval(calibration.timer);
+    floorBusyUntil = 0;
+    calibration = Object.assign(note, { until: Date.now() + 12000 });
+    renderChrome();
+    setTimeout(() => { if (calibration === note) { calibration = null; renderChrome(); } }, 12100);
   }
 
   function renderMeter() {
@@ -1454,6 +1506,15 @@
       renderMeter();
       sendVad(v);
     });
+    const sendFloor = debounce((v) => run('SetVADFloor', [v]), 80);
+    $('vadFloorSlider').addEventListener('input', (e) => {
+      const v = floorFromPos(Number(e.target.value) / 1000);
+      floorBusyUntil = Date.now() + 700;
+      $('vadFloorValue').textContent = v > 0 ? String(v) : 'sem mínimo';
+      state.audio.vadFloor = v;
+      sendFloor(v);
+    });
+    $('vadCalibrate').addEventListener('click', calibrateVoice);
     const sendVol = debounce((v) => run('SetOutputVolume', [v]), 60);
     $('volSlider').addEventListener('input', (e) => {
       volBusyUntil = Date.now() + 700;
@@ -3524,6 +3585,27 @@
         await pick('neural');
         const back = state.audio.noiseSuppression === true && state.audio.noiseMode === 'neural' && !$('nsModeRow').hidden;
         chk('noiseMode', start && classic && off && back, JSON.stringify({ start, classic, off, back }));
+      }
+      // sensibilidade da detecção de voz: o controle, a calibração e os outros modos
+      {
+        const slide = async (pos) => { $('vadFloorSlider').value = String(pos); $('vadFloorSlider').dispatchEvent(new Event('input', { bubbles: true })); await wait(900); };
+        const mode = async (value) => { document.querySelector('input[name="vadMode"][value="' + value + '"]').click(); await wait(30); };
+        const start = state.audio.vadMode === 'auto' && state.audio.vadFloor === 0 && !$('vadFloorRow').hidden && !$('vadFloorSlider').hidden &&
+          $('vadSlider').hidden && $('vadFloorValue').textContent === 'sem mínimo' && $('vadFloorHint').hidden;
+        await slide(500);
+        const half = floorFromPos(0.5);
+        const set = state.audio.vadFloor === half && $('vadFloorValue').textContent === String(half) && $('vadFloorHint').hidden;
+        $('vadCalibrate').click(); await wait(30);
+        const busy = $('vadCalibrate').disabled && $('vadFloorSlider').disabled && $('vadCalibrate').textContent.includes('Ouvindo') && !$('vadFloorHint').hidden && $('vadFloorHint').textContent.includes('Fale normalmente');
+        await wait(800);
+        const done = !$('vadCalibrate').disabled && state.audio.vadFloor === 600 && $('vadFloorValue').textContent === '600' &&
+          $('vadFloorSlider').value === String(Math.round(floorPos(600) * 1000)) && !$('vadFloorHint').hidden && $('vadFloorHint').textContent.includes('2400') && $('vadFloorHint').textContent.includes('600');
+        await mode('level');
+        const hiddenInLevel = $('vadFloorRow').hidden && $('vadFloorSlider').hidden && $('vadFloorHint').hidden && !$('vadSlider').hidden;
+        await mode('auto');
+        await slide(0);
+        const off = state.audio.vadFloor === 0 && $('vadFloorValue').textContent === 'sem mínimo' && !$('vadFloorRow').hidden;
+        chk('vadFloor', start && set && busy && done && hiddenInLevel && off, JSON.stringify({ start, set, busy, done, hiddenInLevel, off }));
       }
       // importar um pacote de sons de avisos
       {

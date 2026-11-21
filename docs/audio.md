@@ -72,7 +72,27 @@ com correção de erros).
   voz: tosse, espirro, risada, cachorro, choro de bebê, e a fala de outras
   pessoas (`EvalFarVoice`: uma voz de fundo 26 dB abaixo de uma voz normal
   mantém o microfone aberto 73% do tempo; 38 dB abaixo, 37% — com a clássica,
-  61% e 22%).
+  61% e 22%). Contra a fala dos outros o que funciona é a sensibilidade, logo
+  abaixo.
+
+  **Sensibilidade** ("Mínimo para abrir", no painel do microfone): o que
+  separa a sua voz da de quem está longe do microfone é o volume, e só você
+  sabe o do seu. Com um mínimo definido, do silêncio só abre o microfone a voz
+  que chega a esse nível; depois de aberto, a fala segue normalmente (sílabas
+  fracas e finais de frase passam), e até 600 ms depois da voz o mínimo cai à
+  metade, para uma palavra dita mais baixo no meio da frase não ficar de fora.
+  O botão **Calibrar com a minha voz** ouve você falar por 5 segundos (nada é
+  transmitido enquanto isso) e põe o mínimo 12 dB abaixo do nível da sua voz;
+  o controle ao lado ajusta à mão, e na ponta esquerda desliga (o padrão).
+  Medido com cada voz calibrada assim (`EvalSensitivity`, 5 vozes
+  sintetizadas): falando no nível da calibração, o começo de 1 frase em 33
+  passa a sair cortado; 6 dB mais baixo, 2 em 33; 11 dB mais baixo, 10 em 33
+  (eram 2) — se você costuma falar bem mais baixo do que na calibração,
+  diminua o mínimo. Uma voz de fundo 20 dB abaixo da sua deixa de manter o
+  microfone aberto 69% do tempo e passa a 7%; 26 dB abaixo, 0%; 14 dB abaixo,
+  de 70% para 49%. Com 6 leituras gravadas os números vão na mesma direção
+  (20 dB abaixo: de 77% para 18%). Vale só na detecção de voz: "por volume" e
+  "apertar para falar" têm as próprias regras.
 
   As vozes dessas medidas são sintetizadas ou de leitores gravados: o que elas
   não dizem é como fica a **sua** voz, no seu microfone. Para comparar de
@@ -185,6 +205,8 @@ FURITO_EVAL=1 go test ./audio/ -run EvalKeyboard -v
 FURITO_NOISE=pasta FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalNoiseLeak -v -timeout 60m
 # voz de fundo (TV, gente conversando no cômodo): quanto tempo abre o microfone
 FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalFarVoice -v
+# sensibilidade calibrada: o que custa a quem fala e o que segura da voz de fundo
+FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalSensitivity -v
 ```
 
 No macOS dá para gerar fala de teste com as vozes do sistema:
