@@ -24,6 +24,11 @@ import (
 // detector de voz. No modo neural soma-se a elas a probabilidade de voz que o
 // RNNoise devolve, que continua certa com ventilador ao fundo e voz baixa,
 // onde a relação sinal/ruído sozinha não separa a fala do ambiente.
+//
+// No modo neural o microfone só abre com a rede de acordo e o áudio que sai é
+// o do RNNoise: o que ela trata como ruído (teclado, cliques, batidas) não tem
+// outro caminho para chegar à transmissão. A única exceção é a consoante que
+// abre uma frase (ver Plain).
 
 // Modos de supressão de ruído.
 const (
@@ -84,9 +89,15 @@ const (
 	neuralKept  = 0.85 // …desde que tenha deixado passar pelo menos esta fração do nível do quadro
 	neuralAlone = 5    // quadros seguidos (100 ms) de certeza com o nível firme que valem como voz mesmo sem tom firme
 	neuralFirm  = 0.5  // "nível firme": menor/maior nível nos últimos 40 ms
-	// Rede de segurança: tantos quadros seguidos (120 ms) de voz pelas medidas
-	// clássicas valem mesmo que a rede discorde. O teclado não passa de 2.
-	plainAlone = 6
+	// A rede não olha o volume: para ela, a TV do outro cômodo ou alguém
+	// conversando longe do microfone é fala igual à de quem usa o app. Por isso,
+	// depois de neuralIdle quadros (600 ms) sem voz, a certeza dela só abre o
+	// microfone se o som tiver corpo: nível de pelo menos neuralFloor (−44 dBFS)
+	// ou a relação sinal/ruído que o detector clássico pede. Com a fala em
+	// andamento não há esse teste — sílabas fracas e finais de frase ficam
+	// abaixo disso.
+	neuralIdle  = 30
+	neuralFloor = 200.0
 )
 
 // nsBandCenters são os centros das bandas (Hz). Até ~650 Hz há uma banda por
@@ -166,8 +177,8 @@ type VoiceProcessor struct {
 	vadPhase       int
 	prevLag        int        // período de tom do quadro anterior (0 = sem tom)
 	prevSpeech     bool       // o quadro anterior era voz
-	plainRun       int        // modo neural: quadros seguidos de voz pelas medidas clássicas
 	sureRun        int        // modo neural: quadros seguidos em que a rede tem certeza e o nível está firme
+	idle           int        // modo neural: quadros desde a última voz
 	hopLevels      [4]float64 // nível dos últimos 4 blocos de 10 ms (sinal limpo)
 
 	agc *leveler
@@ -244,7 +255,7 @@ func (p *VoiceProcessor) Process(frame []float64, noise string, autoGain bool) V
 			// Estado novo a cada vez que o modo é ligado: o antigo guardaria
 			// 20 ms de um áudio que já passou.
 			p.rn = rnnoise.New()
-			p.rnProb, p.plainRun, p.sureRun = [2]float64{}, 0, 0
+			p.rnProb, p.sureRun, p.idle = [2]float64{}, 0, farAway
 			// A espera começa com o próprio começo do quadro, não com zeros:
 			// um trecho de silêncio absoluto faria o estimador de ruído partir
 			// do zero e tomar o ambiente por som durante meio segundo.
@@ -328,28 +339,32 @@ func (p *VoiceProcessor) Process(frame []float64, noise string, autoGain bool) V
 	}
 	p.plain = clean
 	if autoGain {
+		// No modo neural o ganho só aprende com os quadros que a rede deixou
+		// passar como voz: nos outros o RNNoise abaixou o som, e medir esse
+		// nível faria o ganho subir ao máximo à toa.
 		before := p.agc.gain
-		p.agc.run(frame, feat.Speech)
+		p.agc.run(frame, feat.Speech && (!neural || feat.Sure))
 		ramp(p.plain[:], before, p.agc.gain) // o mesmo ganho nas duas versões
 	}
 	return feat
 }
 
 // neuralVoice refaz a decisão de voz do quadro no modo neural. Quem diz se há
-// voz acima do ruído passa a ser a rede, no lugar da relação sinal/ruído; o
-// tom firme e a sustentação continuam sendo a defesa contra o teclado. Cada
-// detector só decide sozinho com uma evidência longa demais para uma tecla
-// produzir: 100 ms de certeza da rede com o nível firme (voz rouca, palavra
-// curta sem tom firme), ou 120 ms de voz pelas medidas clássicas (uma voz que
-// a rede não reconheça).
+// voz passa a ser a rede, no lugar da relação sinal/ruído; o tom firme e a
+// sustentação continuam sendo a defesa contra o teclado, que a engana por
+// instantes. Sem tom firme (voz rouca, palavra curta), a certeza da rede só
+// vale depois de 100 ms com o nível firme, tempo que uma tecla não dura.
+//
+// As medidas clássicas sozinhas não abrem o microfone: o que elas tomam por
+// voz e a rede não (porta rangendo, aspirador, máquina de lavar) é ruído com
+// tom. Nas 11 vozes medidas (6 leituras gravadas, 5 vozes sintetizadas)
+// nenhum trecho de fala dependeu delas.
 //
 // feat chega com Pitched e Speech calculados pelas medidas clássicas.
 func (p *VoiceProcessor) neuralVoice(feat *VoiceFeatures, steady bool) {
 	feat.Sure = feat.Neural >= neuralSure && feat.Kept >= neuralKept
-	if feat.Speech {
-		p.plainRun++
-	} else {
-		p.plainRun = 0
+	if p.idle > neuralIdle && feat.Level < neuralFloor && feat.SNR < vadMinSNR {
+		feat.Sure = false // voz fraca demais para abrir do silêncio: é de longe
 	}
 	if feat.Sure && feat.Sustain >= neuralFirm {
 		p.sureRun++
@@ -357,17 +372,22 @@ func (p *VoiceProcessor) neuralVoice(feat *VoiceFeatures, steady bool) {
 		p.sureRun = 0
 	}
 	alone := p.sureRun >= neuralAlone
-	feat.Pitched = alone || (steady && feat.Level > 20 && (feat.Sure || p.plainRun >= plainAlone))
+	feat.Pitched = alone || (steady && feat.Level > 20 && feat.Sure)
 	feat.Speech = alone || (feat.Pitched && feat.Sustain >= vadMinSustain)
+	if feat.Speech {
+		p.idle = 0
+	} else if p.idle < farAway {
+		p.idle++
+	}
 }
 
 // Plain devolve o último quadro tratado pela supressão clássica, alinhado e
 // com o mesmo ganho do que Process deixou no quadro. Serve ao modo neural: o
-// RNNoise só reconhece a fala quando a vogal chega e, com ruído ao fundo,
-// abafa a consoante que abre a frase ("s", "f", "ch"); a supressão clássica
-// não tem esse defeito. O transmissor usa esta versão no começo de cada trecho
-// de fala, até a rede deixar o som passar (ver Engine.pick). O conteúdo vale
-// até a próxima chamada de Process.
+// RNNoise só reconhece a fala quando a vogal chega e, até lá, trata a
+// consoante que abre a frase ("s", "f", "ch") como ruído — sem isto, em 5 de
+// 134 frases medidas o começo perdia mais de 6 dB, e em 3 delas sumia. O
+// transmissor usa esta versão só nesses quadros (ver Engine.pick). O conteúdo
+// vale até a próxima chamada de Process.
 func (p *VoiceProcessor) Plain() []float64 { return p.plain[:] }
 
 // hop processa 10 ms: devolve em out o trecho limpo e retorna o SNR (dB) nos

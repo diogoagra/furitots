@@ -24,10 +24,12 @@ com correção de erros).
   sintético (`go test ./audio/ -run EvalNoiseSuppression`): nas pausas o
   ventilador cai 50 dB com a neural (24 dB com a clássica) e a digitação, 20 a
   23 dB (4 a 5 dB); o nível da fala fica igual nos dois. O RNNoise só reconhece
-  uma fala quando a vogal chega e, com ruído ao fundo, abafa a consoante que
-  abre a frase ("s", "ch"); por isso cada trecho de fala começa com o áudio
-  da supressão clássica e passa para o do RNNoise quando a rede deixa o som
-  passar (`Engine.pick`).
+  uma fala quando a vogal chega e, até lá, apaga a consoante de sopro que abre
+  a frase ("Chega" vira "ega"); por isso, do começo de cada trecho de fala até
+  a rede reconhecer a voz, os quadros que são um chiado agudo que dura saem
+  com o áudio da supressão clássica (`Engine.pick`). Só eles: o ambiente, as
+  teclas e os cliques que entram junto com o começo da frase saem pelo
+  RNNoise, como todo o resto.
 - **Detecção de voz**: um quadro só conta como voz se está acima do ruído, é
   periódico (tem tom), mantém o tom entre quadros e se sustenta — uma batida
   de tecla ressoa como um tom, mas desaba em milissegundos. A decisão de
@@ -38,20 +40,43 @@ com correção de erros).
   Com a supressão neural, quem diz se há voz acima do ruído é a rede (a
   probabilidade de voz que o RNNoise devolve e quanto do som ele deixou
   passar), no lugar da relação sinal/ruído; o tom e a sustentação continuam
-  sendo a defesa contra o teclado, que engana a rede por instantes. Cada um dos
-  dois só abre o microfone sozinho com uma evidência longa demais para uma
-  tecla: 100 ms de certeza da rede com o nível firme (voz rouca ou sem tom
-  firme) ou 120 ms de voz pelas medidas clássicas (uma voz que a rede não
-  reconheça). O que isso muda, medido (`EvalSpeechEdges`, `EvalKeyboard`):
-  - voz baixa com ventilador: de 48 frases, o começo saía cortado em 16 e o
-    fim em 17 com a clássica; com a neural, 3 e 0;
-  - só teclado, sem ninguém falando, 48 execuções de 10 s por teclado: o
-    microfone abre em 6 (notebook) e 16 (mecânico) com a clássica, e em
-    nenhuma com a neural.
+  sendo a defesa contra o teclado, que engana a rede por instantes. Sem tom
+  firme (voz rouca), a certeza da rede só vale depois de 100 ms com o nível
+  firme, tempo que uma tecla não dura. O microfone só abre com a rede de
+  acordo: o que as medidas clássicas tomam por voz e ela não é ruído com tom
+  (porta rangendo, aspirador, máquina de lavar), e um chiado que dura (palmas,
+  passos) só conta como consoante de sopro se a rede ouvir fala nele. O ganho
+  automático só aprende com os quadros que a rede deixou passar como voz.
 
-  As vozes dessas medidas são sintetizadas e o teclado é sintético: o que elas
-  não dizem é como fica a **sua** voz. Para comparar de ouvido, o "Testar:
-  ouvir minha voz" do painel do microfone, trocando o tipo.
+  A rede não olha o volume: a TV do outro cômodo ou alguém conversando longe
+  do microfone é fala para ela. Por isso, depois de 600 ms sem voz, ela só
+  abre o microfone com um som que tenha corpo (nível de −44 dBFS ou 4 dB acima
+  do ruído); com a fala em andamento não há esse teste, porque sílabas fracas
+  e finais de frase ficam abaixo disso.
+
+  O que isso dá, medido:
+  - voz baixa com ventilador (`EvalSpeechEdges`): de 48 frases, o começo saía
+    cortado em 16 e o fim em 17 com a clássica; com a neural, 3 e 0;
+  - só teclado sintético, sem ninguém falando (`EvalKeyboard`), 48 execuções
+    de 10 s por teclado: o microfone abre em 6 (notebook) e 16 (mecânico) com
+    a clássica, e em nenhuma com a neural;
+  - ruídos gravados de verdade (`EvalNoiseLeak`: 16 tipos do ESC-50 —
+    teclado, mouse, respiração, tosse, palmas, cachorro… — e 4 leitores do
+    LibriVox): só com o ruído, o microfone fica aberto 284 s de 1280 s com a
+    clássica e 152 s com a neural; com fala e o ruído 12 dB abaixo dela, o que
+    sai fora da fala fica em média 10 dB abaixo da voz com a clássica e 19 dB
+    com a neural (teclado: 35 dB; mouse: 38 dB), e nos 200 ms antes de cada
+    frase, 9 dB e 17 dB (teclado: 25 dB; mouse: 27 dB).
+
+  O que a rede toma por voz passa, e ela toma por voz o que se parece com
+  voz: tosse, espirro, risada, cachorro, choro de bebê, e a fala de outras
+  pessoas (`EvalFarVoice`: uma voz de fundo 26 dB abaixo de uma voz normal
+  mantém o microfone aberto 73% do tempo; 38 dB abaixo, 37% — com a clássica,
+  61% e 22%).
+
+  As vozes dessas medidas são sintetizadas ou de leitores gravados: o que elas
+  não dizem é como fica a **sua** voz, no seu microfone. Para comparar de
+  ouvido, o "Testar: ouvir minha voz" do painel do microfone, trocando o tipo.
   Sussurro: no modo "Por volume" abre sempre; na detecção de voz, só com a
   supressão neural e se a rede o reconhecer (não foi medido).
 - **Começo e fim das frases**: a voz só é confirmada depois de a palavra ter
@@ -155,6 +180,11 @@ FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run 'EvalSpeechEdges|EvalNoiseSuppre
 FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalEffects -v
 # teclado sem fala: em quantas execuções o microfone abre
 FURITO_EVAL=1 go test ./audio/ -run EvalKeyboard -v
+# ruídos gravados de verdade (pasta de WAVs "categoria__nome.wav"): quanto tempo
+# o microfone fica aberto só com o ruído e quanto dele sai junto com a fala
+FURITO_NOISE=pasta FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalNoiseLeak -v -timeout 60m
+# voz de fundo (TV, gente conversando no cômodo): quanto tempo abre o microfone
+FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalFarVoice -v
 ```
 
 No macOS dá para gerar fala de teste com as vozes do sistema:
@@ -165,5 +195,10 @@ afconvert -f WAVE -d LEI16@48000 -c 1 fala.aiff fala.wav
 ```
 
 Os números citados nesta página vieram de vozes sintetizadas assim e de um
-teclado sintético (`audio.SynthKeyboard`), não de gravações de pessoas nem de
-teclados de verdade.
+teclado sintético (`audio.SynthKeyboard`), menos os de `EvalNoiseLeak` e
+`EvalFarVoice`, que usaram ruídos do [ESC-50](https://github.com/karolpiczak/ESC-50)
+(convertidos para 48 kHz mono, nomeados `categoria__arquivo.wav`) e leituras
+do [LibriVox](https://librivox.org) em português; nenhuma dessas gravações vem
+com o projeto. O teclado sintético é fácil demais: nunca abriu o microfone no
+modo neural, e o de verdade abria. Antes de mexer no detector ou na supressão,
+meça com ruído gravado.

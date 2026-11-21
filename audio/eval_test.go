@@ -5,6 +5,8 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -615,6 +617,302 @@ func TestEvalKeyboard(t *testing.T) {
 				mode, name, opened, total, frames, 9*total)
 		}
 	}
+}
+
+// Avaliação do vazamento de ruído com gravações de ruído de verdade (não roda
+// por padrão):
+//
+//	FURITO_NOISE=pasta FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalNoiseLeak -v -timeout 60m
+//
+// FURITO_NOISE é uma pasta de gravações (48 kHz, mono) chamadas
+// "categoria__nome.wav": teclado, mouse, respiração, tosse, cachorro… (as do
+// ESC-50, github.com/karolpiczak/ESC-50, servem; não vêm com o projeto). Para
+// cada categoria e cada modo de supressão mede o que os outros ouviriam:
+//
+//   - só o ruído, sem ninguém falando, fraco e forte: quanto tempo o microfone
+//     fica aberto e quanta energia do ruído sai (contando o silêncio);
+//   - com fala (FURITO_SPEECH) e o ruído 12 dB abaixo dela: o nível do que sai
+//     fora da fala e nos 200 ms antes de cada frase, em dB sobre a fala.
+//
+// Um sinal sintético engana: o teclado de SynthKeyboard nunca abre o microfone
+// no modo neural, e o de verdade abria. É esta avaliação que diz se uma
+// mudança no detector ou na supressão deixou passar mais ruído.
+func TestEvalNoiseLeak(t *testing.T) {
+	dir := os.Getenv("FURITO_NOISE")
+	if dir == "" {
+		t.Skip("defina FURITO_NOISE com uma pasta de gravações de ruído")
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "*.wav"))
+	byCat := map[string][]string{}
+	for _, f := range files {
+		cat, _, _ := strings.Cut(filepath.Base(f), "__")
+		byCat[strings.TrimSuffix(cat, ".wav")] = append(byCat[strings.TrimSuffix(cat, ".wav")], f)
+	}
+	var cats []string
+	for c := range byCat {
+		cats = append(cats, c)
+	}
+	sort.Strings(cats)
+	if len(cats) == 0 {
+		t.Fatalf("nenhum .wav em %s", dir)
+	}
+	// track monta n amostras de ruído da categoria, cada gravação no nível
+	// pedido, sobre o chiado de uma sala quieta.
+	track := func(cat string, n int, level float64) []float64 {
+		rng := rand.New(rand.NewSource(77))
+		out := make([]float64, 0, n+5*SampleRate)
+		for len(out) < n {
+			clip := loadFloat(t, byCat[cat][rng.Intn(len(byCat[cat]))])
+			scaleActive(clip, level)
+			out = append(out, clip...)
+		}
+		out = out[:n]
+		for i := range out {
+			out[i] += rng.NormFloat64() * 40
+		}
+		return out
+	}
+	modes := []string{NoiseClassic, NoiseNeural}
+	engine := func(mode string) *Engine {
+		e, err := newEngine(func([]byte) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.SetNoiseMode(mode)
+		return e
+	}
+
+	// Só o ruído.
+	const quietSec = 40
+	total := map[string]float64{}
+	for _, cat := range cats {
+		line := fmt.Sprintf("%-18s", cat)
+		for _, level := range []float64{400, 2500} {
+			noise := track(cat, quietSec*SampleRate, level)
+			line += fmt.Sprintf(" | nível %4.0f:", level)
+			for _, mode := range modes {
+				e := engine(mode)
+				e.SetAutoGain(false)
+				weight, _, sent := traceTx(e, noise)
+				e.Close()
+				var open, out, in float64
+				for i := range noise {
+					if weight[i] > 0 {
+						open++
+					}
+					out += sent[i] * sent[i]
+					in += noise[i] * noise[i]
+				}
+				total[mode] += open / SampleRate
+				line += fmt.Sprintf(" %s %4.1f s (%6.1f dB)", mode, open/SampleRate, math.Max(-99, 10*math.Log10((out+1e-9)/in)))
+			}
+		}
+		t.Log(line)
+	}
+	for _, mode := range modes {
+		t.Logf("só ruído, %-8s microfone aberto %.1f s de %d s", mode, total[mode], 2*quietSec*len(cats))
+	}
+
+	// Fala + ruído.
+	if os.Getenv("FURITO_SPEECH") == "" {
+		return
+	}
+	speech := make([]float64, 3*SampleRate)
+	for _, p := range strings.Split(os.Getenv("FURITO_SPEECH"), ",") {
+		speech = append(speech, loadFloat(t, p)...)
+		speech = append(speech, make([]float64, SampleRate)...)
+	}
+	speech = speech[:len(speech)/FrameSize*FrameSize]
+	peak := scaleActive(speech, 2500)
+	nf := len(speech) / FrameSize
+	active := make([]bool, nf)
+	var speechPow float64
+	k := 0
+	for f := range active {
+		fr := speech[f*FrameSize : (f+1)*FrameSize]
+		if active[f] = rmsFloat(fr) > 0.02*peak; active[f] {
+			speechPow += rmsFloat(fr) * rmsFloat(fr)
+			k++
+		}
+	}
+	speechPow /= float64(k)
+	off := make([]bool, nf) // a mais de 60 ms de qualquer fala
+	pre := make([]bool, nf) // os 200 ms antes de uma frase que vem depois de 500 ms de pausa
+	for f := range off {
+		off[f] = true
+		for j := f - 3; j <= f+3; j++ {
+			if j >= 0 && j < nf && active[j] {
+				off[f] = false
+			}
+		}
+	}
+	for f := 25; f < nf; f++ {
+		if !active[f] {
+			continue
+		}
+		quiet := true
+		for j := f - 25; j < f; j++ {
+			quiet = quiet && !active[j]
+		}
+		if quiet {
+			for j := f - 10; j < f; j++ {
+				pre[j] = true
+			}
+		}
+	}
+	sum := map[string][3]float64{}
+	for _, cat := range cats {
+		noise := track(cat, len(speech), 2500*math.Pow(10, -12.0/20))
+		in := make([]float64, len(speech))
+		for i := range in {
+			in[i] = speech[i] + noise[i]
+		}
+		line := fmt.Sprintf("%-18s", cat)
+		for _, mode := range modes {
+			e := engine(mode)
+			weight, _, sent := traceTx(e, in)
+			e.Close()
+			var offOut, preOut, open float64
+			var offN, preN int
+			for f := 0; f < nf; f++ {
+				var o, w float64
+				for i := f * FrameSize; i < (f+1)*FrameSize; i++ {
+					o += sent[i] * sent[i]
+					w += weight[i]
+				}
+				if off[f] {
+					offN++
+					offOut += o
+					if w > 0 {
+						open += 0.02
+					}
+				}
+				if pre[f] {
+					preN++
+					preOut += o
+				}
+			}
+			offDB := 10 * math.Log10((offOut/float64(offN*FrameSize)+1e-6)/speechPow)
+			preDB := 10 * math.Log10((preOut/float64(preN*FrameSize)+1e-6)/speechPow)
+			line += fmt.Sprintf(" | %-7s fora da fala: aberto %4.1f de %4.1f s, %6.1f dB; antes da frase %6.1f dB", mode, open, float64(offN)*0.02, offDB, preDB)
+			a := sum[mode]
+			a[0] += open
+			a[1] += math.Pow(10, offDB/10)
+			a[2] += math.Pow(10, preDB/10)
+			sum[mode] = a
+		}
+		t.Log(line)
+	}
+	for _, mode := range modes {
+		a := sum[mode]
+		t.Logf("fala + ruído, %-8s fora da fala: aberto %.1f s, média %.1f dB; antes da frase %.1f dB",
+			mode, a[0], 10*math.Log10(a[1]/float64(len(cats))), 10*math.Log10(a[2]/float64(len(cats))))
+	}
+}
+
+// Avaliação da voz de fundo (não roda por padrão):
+//
+//	FURITO_SPEECH=a.wav,b.wav go test ./audio/ -run EvalFarVoice -v
+//
+// As gravações viram uma voz de longe (mais sala que som direto, como a TV ou
+// alguém conversando no cômodo) em vários níveis, sem ninguém falando no
+// microfone: quanto tempo ela mantém o microfone aberto e com que nível sai,
+// com o ganho automático ligado. Para a rede do RNNoise isso é fala; o que
+// segura é o teste de nível de neuralVoice, e só para vozes fracas.
+func TestEvalFarVoice(t *testing.T) {
+	if os.Getenv("FURITO_SPEECH") == "" {
+		t.Skip("defina FURITO_SPEECH com gravações de fala")
+	}
+	var src []float64
+	for _, p := range strings.Split(os.Getenv("FURITO_SPEECH"), ",") {
+		src = append(src, loadFloat(t, p)...)
+	}
+	rng := rand.New(rand.NewSource(3))
+	far := farVoice(src, rng)
+	for _, level := range []float64{30, 60, 120, 250, 500} {
+		x := append([]float64(nil), far...)
+		scaleActive(x, level)
+		for i := range x {
+			x[i] += rng.NormFloat64() * 40
+		}
+		line := fmt.Sprintf("voz de fundo a %+5.1f dB de uma voz normal:", 20*math.Log10(level/2500))
+		for _, mode := range []string{NoiseClassic, NoiseNeural} {
+			e, err := newEngine(func([]byte) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.SetNoiseMode(mode)
+			weight, _, sent := traceTx(e, x)
+			e.Close()
+			var open, out float64
+			for i := range x {
+				if weight[i] > 0 {
+					open++
+					out += sent[i] * sent[i]
+				}
+			}
+			line += fmt.Sprintf(" | %-7s aberto %3.0f%% do tempo, sai com nível %4.0f", mode, 100*open/float64(len(x)), math.Sqrt(out/(open+1)))
+		}
+		t.Log(line)
+	}
+}
+
+// farVoice transforma uma gravação de fala numa voz de longe: uma sala
+// sintética (cauda de ruído que cai 60 dB em meio segundo) mais forte que o
+// som direto. Devolve quadros inteiros.
+func farVoice(src []float64, rng *rand.Rand) []float64 {
+	far := append([]float64(nil), src...)
+	const tail = SampleRate / 2
+	var taps [][2]float64
+	var energy float64
+	for i := 240; i < tail; i += 7 {
+		g := rng.NormFloat64() * math.Exp(-6.9*float64(i)/tail)
+		taps = append(taps, [2]float64{float64(i), g})
+		energy += g * g
+	}
+	for _, tap := range taps {
+		d, g := int(tap[0]), 1.5*tap[1]/math.Sqrt(energy)
+		for j := 0; j+d < len(src); j++ {
+			far[j+d] += g * src[j]
+		}
+	}
+	return far[:len(far)/FrameSize*FrameSize]
+}
+
+// loadFloat lê uma gravação (48 kHz, mono) na escala de 16 bits.
+func loadFloat(t *testing.T, path string) []float64 {
+	t.Helper()
+	pcm, err := DecodeAudioFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]float64, len(pcm))
+	toFloat(out, pcm)
+	return out
+}
+
+// scaleActive põe o sinal no nível pedido, medido só nos quadros com som (os
+// que passam de 3% do mais forte), e devolve o nível do quadro mais forte.
+func scaleActive(x []float64, level float64) (peak float64) {
+	for s := 0; s+FrameSize <= len(x); s += FrameSize {
+		peak = math.Max(peak, rmsFloat(x[s:s+FrameSize]))
+	}
+	var sum float64
+	k := 0
+	for s := 0; s+FrameSize <= len(x); s += FrameSize {
+		if l := rmsFloat(x[s : s+FrameSize]); l > 0.03*peak {
+			sum += l * l
+			k++
+		}
+	}
+	if k == 0 {
+		return 0
+	}
+	g := level / math.Sqrt(sum/float64(k))
+	for i := range x {
+		x[i] *= g
+	}
+	return peak * g
 }
 
 // Avaliação dos efeitos de voz com gravações de fala (não roda por padrão):

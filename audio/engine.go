@@ -30,6 +30,8 @@ const (
 	tailMaxRise      = 3.0                    // no fim da palavra: o nível subir mais que isso em 20 ms é um estalo, não a palavra continuando
 	steadySNR        = 8.0                    // dB acima do ruído para um som sem tom contar como sílaba
 	steadyLevel      = 0.4                    // idem: menor/maior nível ao longo de 80 ms
+	onsetHissSNR     = 6.0                    // modo neural, consoante que abre a frase: dB acima do ruído nos agudos…
+	onsetHissHigh    = 0.6                    // …e fração da energia acima de 3 kHz (ver pick)
 	confirmMinPeak   = 0.5                    // para abrir: o quadro com voz mais forte, em relação ao mais forte dos últimos 80 ms
 	hangoverFrames   = 15                     // 300 ms sem fala antes de encerrar a transmissão
 	levelHangover    = 25                     // modo por volume: 500 ms de cauda após cair do limiar
@@ -115,7 +117,8 @@ type Engine struct {
 	tailAlive  bool      // o som que veio depois da voz ainda não parou
 	fricative  bool      // no meio de um "s"/"f"/"ch"
 	prevPass   bool
-	onset      bool                                       // modo neural: o trecho de fala começou e a rede ainda não deixou o som passar
+	onset      bool                                       // modo neural: o trecho de fala começou e a rede ainda não reconheceu a voz
+	plainMix   float64                                    // modo neural: quanto do último quadro enviado era o áudio clássico (0 a 1; -1 = trecho começando)
 	onQueue    func(seq int, whole bool, audio []float64) // testes: quadro do microfone posto na fila de envio
 	txOn       bool
 	opusBuf    []byte
@@ -753,12 +756,14 @@ type txSlot struct {
 	voice     []float64
 	plain     []float64 // modo neural: o mesmo quadro pela supressão clássica (ver pick)
 	sure      bool      // modo neural: a rede tem certeza de que é voz e deixa o som passar
+	unheard   bool      // modo neural: a rede não ouve fala neste quadro (um chiado assim é ruído, não consoante)
 	voiced    bool      // o detector viu voz neste quadro
 	sound     bool      // há som acima do ruído (voz ou não)
 	pitched   bool      // tem tom de voz, sem o nível ter se sustentado ainda
 	confirmed bool      // faz parte de um trecho de voz sustentado (não é um estalo)
 	level     float64
 	snr       float64
+	highSNR   float64 // dB acima do ruído nos agudos (4–10 kHz)
 	high      float64
 	sustain   float64
 	rise      float64
@@ -797,9 +802,10 @@ func (e *Engine) txFrame(mic []int16) {
 		toFloat(slot.voice, mic)
 		feat := e.vp.Process(slot.voice, noise, autoGain)
 		slot.voiced, slot.sound, slot.level, slot.snr, slot.high, slot.sustain = feat.Speech, feat.Sound, feat.Level, feat.SNR, feat.HighRatio, feat.Sustain
-		slot.rise, slot.pitched = feat.Rise, feat.Pitched
+		slot.rise, slot.pitched, slot.highSNR = feat.Rise, feat.Pitched, feat.HighSNR
 		if noise == NoiseNeural {
 			slot.plain, slot.sure = append([]float64(nil), e.vp.Plain()...), feat.Sure
+			slot.unheard = feat.Neural < neuralHeard
 		}
 
 		e.micLevel.Store(math.Float64bits(feat.Level))
@@ -825,7 +831,7 @@ func (e *Engine) txFrame(mic []int16) {
 			}
 			if e.coupling.Load() != couplingSilent && mode != VADPTT && !e.alreadySpeaking() {
 				slot.voiced, slot.sound, slot.pitched = false, false, false
-				slot.level, slot.snr, slot.high, slot.sustain = 0, 0, 0, 0
+				slot.level, slot.snr, slot.highSNR, slot.high, slot.sustain = 0, 0, 0, 0, 0
 			}
 			if left <= 0 {
 				e.learnCoupling()
@@ -907,9 +913,9 @@ func (e *Engine) txFrame(mic []int16) {
 // tinha começado; no fim, o primeiro quadro fora da fala entra sumindo aos
 // poucos, para o som não ser cortado seco.
 func (e *Engine) enqueue(cur *txSlot, pass bool, mode string) {
-	add := func(s *txSlot, whole bool) []float64 {
+	add := func(s *txSlot, whole bool, next ...*txSlot) []float64 {
 		from := len(e.outq)
-		e.outq = append(e.outq, e.pick(s)...)
+		e.outq = append(e.outq, e.pick(s, next...)...)
 		if e.onQueue != nil {
 			e.onQueue(s.seq, whole, e.outq[from:])
 		}
@@ -919,17 +925,25 @@ func (e *Engine) enqueue(cur *txSlot, pass bool, mode string) {
 	case pass:
 		from := len(e.outq)
 		if !e.prevPass {
-			e.onset = true
+			e.onset, e.plainMix = true, -1
 			n := 0
 			if mode != VADPTT { // apertar para falar: nada de antes da tecla
 				n = e.preRoll()
 			}
 			for i := len(e.hist) - n; i < len(e.hist); i++ {
-				add(&e.hist[i], true)
+				next := cur
+				if i+1 < len(e.hist) {
+					next = &e.hist[i+1]
+				}
+				add(&e.hist[i], true, next)
 			}
 			e.hist = e.hist[:0]
 		}
-		add(cur, true)
+		if len(e.ring) > 0 {
+			add(cur, true, &e.ring[0])
+		} else {
+			add(cur, true)
+		}
 		if !e.prevPass {
 			fade(e.outq[from:], true, false)
 		}
@@ -948,25 +962,42 @@ func (e *Engine) enqueue(cur *txSlot, pass bool, mode string) {
 	e.prevPass = pass
 }
 
-// pick escolhe o áudio de um quadro que vai ser transmitido. Fora do modo
-// neural só há um. No modo neural, o RNNoise leva alguns instantes para
-// reconhecer que uma fala começou e, enquanto isso, trata a consoante inicial
-// como ruído; por isso cada trecho de fala começa com a versão da supressão
-// clássica e passa para a do RNNoise (numa transição de 20 ms) no primeiro
-// quadro em que a rede já deixa o som passar. Se ela nunca reconhecer aquela
-// voz, o trecho inteiro sai como no modo clássico, em vez de sair abafado.
-func (e *Engine) pick(s *txSlot) []float64 {
-	if !e.onset || s.plain == nil {
+// pick devolve o áudio de um quadro que vai ser transmitido; next é o quadro
+// que vem depois dele, se já se sabe qual é. No modo neural o áudio é o do
+// RNNoise, com uma exceção: a rede só reconhece a fala quando a vogal chega e,
+// até lá, trata a consoante de sopro que abre a frase ("s", "ch", "f") como
+// ruído e a apaga ("Chega" vira "ega"). Por isso, do começo de cada trecho até
+// a rede reconhecer a voz, os quadros que são um chiado agudo que dura — e o
+// ataque dele, com o nível ainda subindo — saem com o áudio da supressão
+// clássica. Só eles: o ambiente, as teclas e os cliques que entram junto com o
+// começo da frase saem pelo RNNoise, como todo o resto. A troca entre as duas
+// versões é feita ao longo de um quadro, sem degrau.
+func (e *Engine) pick(s *txSlot, next ...*txSlot) []float64 {
+	mix := 0.0
+	if e.onset && s.plain != nil {
+		hissy := func(s *txSlot) bool { return s.highSNR >= onsetHissSNR && s.high >= onsetHissHigh }
+		lasting := func(s *txSlot) bool { return hissy(s) && s.sustain >= edgeSustain }
+		switch {
+		case s.sure:
+			e.onset = false
+		case lasting(s):
+			mix = 1
+		case hissy(s) && len(next) > 0 && !next[0].sure && lasting(next[0]) && next[0].level >= s.level:
+			mix = 1 // o ataque do chiado; um clique antes dele é mais forte que o que vem depois
+		}
+	}
+	from := e.plainMix
+	if from < 0 {
+		from = mix
+	}
+	e.plainMix = mix
+	if from == 0 && mix == 0 {
 		return s.voice
 	}
-	if !s.sure {
-		return s.plain
-	}
-	e.onset = false
 	out := make([]float64, len(s.voice))
 	for i := range out {
-		w := (float64(i) + 0.5) / float64(len(out))
-		out[i] = s.plain[i]*(1-w) + s.voice[i]*w
+		m := from + (mix-from)*(float64(i)+0.5)/float64(len(out))
+		out[i] = s.voice[i] + m*(s.plain[i]-s.voice[i])
 	}
 	return out
 }
@@ -1256,9 +1287,12 @@ func (e *Engine) decide(cur *txSlot, mode string) bool {
 	}
 	// Consoantes de sopro ("s", "f", "ch", "x") não têm tom, mas são um chiado
 	// agudo que dura; um estalo de teclado também é agudo, só que desaba em
-	// poucos milissegundos.
+	// poucos milissegundos. Palmas, passos e um gole de bebida também são
+	// chiados que duram: no modo neural só conta o chiado em que a rede ouve
+	// fala. (O "s" que abre uma palavra não depende disto: entra com os quadros
+	// guardados quando a vogal é confirmada.)
 	hiss := func(s *txSlot, snr, high float64) bool {
-		return s.snr >= snr && s.high >= high && s.sustain >= 0.3
+		return !s.unheard && s.snr >= snr && s.high >= high && s.sustain >= 0.3
 	}
 	if e.fricative {
 		e.fricative = hiss(cur, 6, 0.45)
