@@ -55,7 +55,9 @@
   supressão espectral clássica continua disponível.
 - **Detecção de voz** que junta a rede neural com medidas de tom e de
   sustentação: o teclado não abre o microfone, e o começo e o fim das frases
-  chegam inteiros. Também há ativação por volume e apertar para falar.
+  chegam inteiros. A sensibilidade se calibra com a sua voz, para a TV ou
+  quem conversa ao lado não abrir o microfone. Também há ativação por volume
+  e apertar para falar.
 - Ganho automático, cancelamento de eco do macOS, volume e "mutar só para
   mim" por pessoa, nivelamento do volume das outras vozes.
 - **Gravação da conversa** em WAV.

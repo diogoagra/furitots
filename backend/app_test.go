@@ -2,6 +2,8 @@ package backend
 
 import (
 	"fmt"
+	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -626,5 +628,136 @@ func TestSettingsSaveDoesNotRaceWithChanges(t *testing.T) {
 	}
 	if _, err := os.Stat(app.opts.SettingsPath + ".tmp"); err == nil {
 		t.Error("sobrou o arquivo temporário dos ajustes")
+	}
+}
+
+// A sensibilidade da detecção de voz é guardada entre execuções; valores fora
+// da escala viram "sem mínimo".
+func TestVADFloorSetting(t *testing.T) {
+	dir := t.TempDir()
+	opts := Options{IdentityPath: filepath.Join(dir, "id.json"), SettingsPath: filepath.Join(dir, "s.json"), DisableAudioDevices: true}
+	app, err := NewApp(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := app.API()
+	if got := api.GetState().Audio.VADFloor; got != 0 {
+		t.Errorf("o padrão é sem mínimo; veio %v", got)
+	}
+	for in, want := range map[float64]float64{10: 50, 99999: 8000, -3: 0, 700: 700} {
+		api.SetVADFloor(in)
+		if got := api.GetState().Audio.VADFloor; got != want || app.engine.VADFloor() != want {
+			t.Errorf("SetVADFloor(%v): estado %v, motor %v; esperado %v", in, got, app.engine.VADFloor(), want)
+		}
+	}
+	api.SetVADFloor(700)
+	app.Shutdown()
+
+	app, err = NewApp(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.API().GetState().Audio.VADFloor; got != 700 || app.engine.VADFloor() != 700 {
+		t.Errorf("a sensibilidade não persistiu: estado %v, motor %v", got, app.engine.VADFloor())
+	}
+	app.Shutdown()
+
+	// um arquivo de ajustes com um valor absurdo não vira um microfone que nunca abre
+	os.WriteFile(opts.SettingsPath, []byte(`{"vadFloor": 123456}`), 0o600)
+	app, err = NewApp(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Shutdown()
+	if got := app.API().GetState().Audio.VADFloor; got != 0 {
+		t.Errorf("valor fora da escala no arquivo: %v, esperado 0", got)
+	}
+}
+
+// feedVoice entrega ao motor, como um microfone, frames de voz sintética (ou
+// só o chiado do ambiente) até stop fechar; done fecha quando ela termina (um
+// microfone é uma fonte só: duas ao mesmo tempo não valem).
+func feedVoice(app *App, voice bool, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	rng := rand.New(rand.NewSource(1))
+	frame := make([]int16, audio.FrameSize)
+	phase, n := 0.0, 0
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		for i := range frame {
+			v := rng.NormFloat64() * 40
+			if voice {
+				sec := float64(n) / audio.SampleRate
+				phase += 2 * math.Pi * 220 * (1 + 0.02*math.Sin(2*math.Pi*5*sec)) / audio.SampleRate
+				var s float64
+				for h := 1; h <= 12; h++ {
+					s += math.Sin(float64(h)*phase) / float64(h)
+				}
+				v += 6000 * (0.25 + 0.75*0.5*(1-math.Cos(2*math.Pi*3*sec))) * s / 1.8
+			}
+			frame[i] = int16(v)
+			n++
+		}
+		app.engine.FeedCapture(frame)
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// "Calibrar com a minha voz": mede a voz que chega ao microfone, ajusta a
+// sensibilidade e a guarda; sem voz, devolve erro e não mexe em nada.
+func TestCalibrateVoice(t *testing.T) {
+	old := calibrationTime
+	calibrationTime = 700 * time.Millisecond
+	defer func() { calibrationTime = old }()
+
+	app, _ := newTestApp(t)
+	api := app.API()
+
+	// Sem voz: erro, e a sensibilidade fica como estava.
+	api.SetVADFloor(300)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go feedVoice(app, false, stop, done)
+	if _, err := api.CalibrateVoice(); err == nil {
+		t.Error("calibrar sem voz deveria dar erro")
+	}
+	close(stop)
+	<-done
+	if got := api.GetState().Audio.VADFloor; got != 300 {
+		t.Errorf("calibração sem voz mexeu na sensibilidade: %v", got)
+	}
+
+	// Com voz: mede, ajusta e guarda. Uma segunda calibração ao mesmo tempo é recusada.
+	stop, done = make(chan struct{}), make(chan struct{})
+	defer func() { close(stop); <-done }()
+	go feedVoice(app, true, stop, done)
+	second := make(chan error, 1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_, err := api.CalibrateVoice()
+		second <- err
+	}()
+	res, err := api.CalibrateVoice()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err == nil {
+		t.Error("duas calibrações ao mesmo tempo: a segunda deveria ser recusada")
+	}
+	t.Logf("voz %.0f, mínimo %.0f", res.Voice, res.Floor)
+	if res.Voice < 2000 || res.Voice > 6000 || res.Floor < 400 || res.Floor > 1600 {
+		t.Errorf("medida fora do esperado para a voz sintética: voz %.0f, mínimo %.0f", res.Voice, res.Floor)
+	}
+	if got := api.GetState().Audio.VADFloor; got != res.Floor || app.engine.VADFloor() != res.Floor {
+		t.Errorf("a sensibilidade não foi aplicada: estado %v, motor %v, calibração %v", got, app.engine.VADFloor(), res.Floor)
+	}
+	app.mu.Lock()
+	saved := app.settings.VADFloor
+	app.mu.Unlock()
+	if saved != res.Floor {
+		t.Errorf("a sensibilidade não foi guardada nos ajustes: %v", saved)
 	}
 }

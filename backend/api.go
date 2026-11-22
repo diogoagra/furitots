@@ -2,6 +2,8 @@ package backend
 
 import (
 	"errors"
+	"fmt"
+	"time"
 
 	"furito-ts/audio"
 )
@@ -142,6 +144,7 @@ type AudioDTO struct {
 
 	VADMode                   string  `json:"vadMode"` // auto | level
 	VADThreshold              float64 `json:"vadThreshold"`
+	VADFloor                  float64 `json:"vadFloor"` // detecção de voz: nível mínimo para abrir o microfone (0 = sem piso)
 	NoiseSuppression          bool    `json:"noiseSuppression"`
 	NoiseMode                 string  `json:"noiseMode"` // tipo da supressão: neural (RNNoise) | classic
 	AutoGain                  bool    `json:"autoGain"`
@@ -356,6 +359,59 @@ func (api *API) SetVADThreshold(value float64) {
 	}
 	api.app.engine.SetVADThreshold(value)
 	api.app.updateSettings(func(s *Settings) { s.VADThreshold = value })
+}
+
+// SetVADFloor define a sensibilidade da detecção de voz: o nível, na escala do
+// medidor do microfone, que a voz precisa atingir para abrir o microfone. Zero
+// desliga o piso.
+func (api *API) SetVADFloor(value float64) {
+	api.app.engine.SetVADFloor(value)
+	applied := api.app.engine.VADFloor()
+	api.app.updateSettings(func(s *Settings) { s.VADFloor = applied })
+}
+
+// VoiceCalibration é o resultado de CalibrateVoice.
+type VoiceCalibration struct {
+	Voice float64 `json:"voice"` // nível da voz medida
+	Floor float64 `json:"floor"` // sensibilidade escolhida para ela
+}
+
+// calibrationTime é quanto dura a medida de CalibrateVoice.
+var calibrationTime = 5 * time.Second
+
+// CalibrateVoice ouve o microfone por alguns segundos, com a pessoa falando
+// normalmente, e ajusta a sensibilidade da detecção de voz para a voz dela: o
+// que chega bem mais fraco (a TV, alguém no cômodo) deixa de abrir o
+// microfone. Nada é transmitido durante a medida. Funciona mesmo desconectado
+// (o microfone é aberto só para medir). Sem voz suficiente devolve erro e a
+// sensibilidade fica como estava.
+func (api *API) CalibrateVoice() (VoiceCalibration, error) {
+	a := api.app
+	if !a.calibrating.CompareAndSwap(false, true) {
+		return VoiceCalibration{}, errors.New("a calibração já está em andamento")
+	}
+	defer a.calibrating.Store(false)
+
+	opened := false
+	if !a.opts.DisableAudioDevices && !a.engine.CaptureAvailable() {
+		if err := a.engine.StartCapture(); err != nil {
+			return VoiceCalibration{}, fmt.Errorf("não consegui abrir o microfone: %w", err)
+		}
+		opened = true
+		a.markDirty()
+	}
+	voice, floor, err := a.engine.CalibrateVoice(calibrationTime)
+	if opened && !a.client.IsConnected() && !a.engine.MicTest() {
+		a.engine.StopCapture()
+		a.markDirty()
+	}
+	if err != nil {
+		return VoiceCalibration{}, errors.New("não ouvi voz suficiente: fale normalmente durante a medida")
+	}
+	a.engine.SetVADFloor(floor)
+	applied := a.engine.VADFloor()
+	a.updateSettings(func(s *Settings) { s.VADFloor = applied })
+	return VoiceCalibration{Voice: voice, Floor: applied}, nil
 }
 
 func (api *API) SetOutputVolume(percent float64) {

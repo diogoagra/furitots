@@ -67,7 +67,7 @@
 
     const settings = { host: 'localhost', nickname: 'Furico Caolho', defaultChannel: '' };
     const audio = {
-      effect: 'normal', vadMode: 'auto', vadThreshold: 300, outputVolume: 80, soundboardPlaying: false,
+      effect: 'normal', vadMode: 'auto', vadThreshold: 300, vadFloor: 0, outputVolume: 80, soundboardPlaying: false,
       noiseSuppression: true, noiseMode: 'neural', autoGain: true, echoCancellation: false, echoCancellationAvailable: true,
       normalizeVoices: true, micTest: false, micMode: 'standard', soundboardVolume: 80,
       effects: [['normal', 'Normal'], ['grave', 'Voz grave'], ['agudo', 'Voz aguda'], ['monster', 'Monstro'], ['squirrel', 'Esquilo'],
@@ -466,7 +466,7 @@
       const micLevel = selfFlags.muted || !audio.captureAvailable ? 0
         : Math.round(40 + (Math.floor(tick / 18) % 3 === 1 ? 900 + 700 * Math.abs(Math.sin(tick / 2)) : 60 * Math.abs(Math.sin(tick / 3))));
       const voiceProb = micLevel > 500 ? 0.95 : 0.03;
-      const self = !selfFlags.muted && (audio.vadMode === 'ptt' ? pttDown : audio.vadMode === 'level' ? micLevel >= audio.vadThreshold : voiceProb > 0.5);
+      const self = !selfFlags.muted && (audio.vadMode === 'ptt' ? pttDown : audio.vadMode === 'level' ? micLevel >= audio.vadThreshold : voiceProb > 0.5 && micLevel >= audio.vadFloor);
       const clients = [];
       if (!selfFlags.deafened) {
         if (speaking && findClient(3)) clients.push(3);
@@ -601,6 +601,14 @@
       },
       SetEffect(effect) { audio.effect = String(effect || 'normal'); pushState(); return ok(null); },
       SetVADThreshold(v) { audio.vadThreshold = Math.max(50, Math.min(8000, Number(v) || 50)); pushState(); return ok(null); },
+      SetVADFloor(v) { v = Number(v) || 0; audio.vadFloor = v > 0 ? Math.max(50, Math.min(8000, v)) : 0; pushState(); return ok(null); },
+      // A calibração de mentira leva 0,6 s e "mede" uma voz de nível 2400.
+      CalibrateVoice() {
+        return new Promise((resolve) => setTimeout(() => {
+          audio.vadFloor = 600; pushState();
+          resolve({ voice: 2400, floor: 600 });
+        }, 600));
+      },
       SetOutputVolume(p) { audio.outputVolume = Math.max(0, Math.min(100, Number(p) || 0)); pushState(); return ok(null); },
       SoundboardPlay(name) {
         audio.soundboardPlaying = true; pushState();

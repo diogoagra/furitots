@@ -176,6 +176,7 @@
   <div class="vad">
     <div class="vad-meter"><div class="vad-fill" id="vadFill"></div></div>
     <input type="range" id="vadSlider" min="0" max="1000" step="1" value="350" aria-label="Limiar de ativação por voz">
+    <input type="range" id="vadFloorSlider" min="0" max="1000" step="1" value="0" aria-label="Sensibilidade da detecção de voz: nível mínimo para abrir o microfone" title="A voz precisa chegar a este nível para abrir o microfone. Na ponta esquerda, sem mínimo." hidden>
   </div>
   <div class="vad-legend">
     <span id="vadLevelInfo">Limiar: <b id="vadValue">—</b></span>
@@ -183,6 +184,11 @@
     <span id="vadPttInfo" hidden>Segure a tecla para falar</span>
     <span id="vadGate" class="gate">fechado</span>
   </div>
+  <div class="micmode vad-floor" id="vadFloorRow">
+    <span title="A voz precisa chegar a este nível para abrir o microfone: o que chega mais fraco (a TV, alguém no cômodo) não abre. Depois de aberto, o microfone acompanha a fala normalmente. Se a sua voz for cortada, diminua.">Mínimo para abrir: <b id="vadFloorValue">sem mínimo</b></span>
+    <button class="btn small" id="vadCalibrate" type="button" title="Mede a sua voz por 5 segundos e ajusta o mínimo para ela. Nada é transmitido durante a medida.">Calibrar com a minha voz</button>
+  </div>
+  <div class="muted-text small hint vad-floor" id="vadFloorHint" hidden></div>
   <label class="check"><input type="checkbox" id="optMicTest"> Testar: ouvir minha voz como os outros ouvem</label>
 
   <div class="pop-sub">Vozes dos outros</div>
