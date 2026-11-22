@@ -306,8 +306,8 @@
       8: 'Só música. [u]Sem conversa[/u] aqui!',
     };
     const CLIENT_DETAILS_A = {
-      12: { version: '1.0.0', platform: 'Diogo Agra', furito: true, connectedSince: Date.now() - 1000 },
-      3: { version: '1.0.0', platform: 'Diogo Agra', connectedSince: Date.now() - 3725 * 1000 },
+      12: { version: 'Furito TS 1.0.0', platform: '', furito: true, connectedSince: Date.now() - 1000 },
+      3: { version: 'Furito TS 1.0.0', platform: '', connectedSince: Date.now() - 3725 * 1000 },
       4: { version: '3.6.2 [Stable]', platform: 'Windows', connectedSince: Date.now() - 95 * 1000 },
       5: { version: '6.0.0-beta3', platform: 'Windows', connectedSince: Date.now() - 2 * 86400 * 1000 },
       6: { version: '3.5.6 [Stable]', platform: 'Linux', connectedSince: Date.now() - 40 * 60 * 1000 },
@@ -324,7 +324,7 @@
       3: '[b]Pauta de segunda:[/b] metas do trimestre.',
     };
     const CLIENT_DETAILS_B = {
-      12: { version: '1.0.0', platform: 'Diogo Agra', furito: true, connectedSince: Date.now() - 1000 },
+      12: { version: 'Furito TS 1.0.0', platform: '', furito: true, connectedSince: Date.now() - 1000 },
       3: { version: '6.0.0-beta3', platform: 'macOS', connectedSince: Date.now() - 5400 * 1000 },
       4: { version: '3.6.2 [Stable]', platform: 'Windows', connectedSince: Date.now() - 20 * 60 * 1000 },
       5: { version: '3.6.2 [Stable]', platform: 'Linux', connectedSince: Date.now() - 3 * 3600 * 1000 },

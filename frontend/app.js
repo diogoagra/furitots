@@ -4313,7 +4313,7 @@
       await call('_mockAvatar', 4, ''); await wait(80);
       chk('avatarRemoved', !$('info').querySelector('img.avatar'));
       select('client', state.self.clientId, true); await wait(30);
-      chk('furitoVersion', me.furito === true && $('info').textContent.includes('1.0.0 Diogo Agra'), me.version + ' ' + me.platform);
+      chk('furitoVersion', me.furito === true && $('info').textContent.includes('Furito TS 1.0.0') && !$('info').textContent.includes('Diogo Agra'), me.version + ' ' + me.platform);
 
       // compartilhamento de tela: o outro cliente simulado compartilha e assiste, com WebRTC de verdade nesta página.
       // Só com ?rtc na URL: conexões de vídeo andam em tempo real, que o relógio acelerado dos testes não espera.

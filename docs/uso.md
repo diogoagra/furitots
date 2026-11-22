@@ -25,7 +25,7 @@ e onde ficam os dados.
   dois. Também: aumentar o nível de segurança e usar chave de privilégio.
 - **Sobre** (botão "i" da barra, ao lado dos Ajustes, ou Ajuda → Sobre): a
   versão do app, o autor, a licença e os créditos.
-- **Versão**: entre clientes Furito a versão aparece como "1.0.1 Diogo Agra".
+- **Versão**: entre clientes Furito a versão aparece como "Furito TS 1.0.1".
   Para o servidor e para os clientes oficiais continua "3.?.? [Build:
   5680278000] Linux": o servidor confere a assinatura da TeamSpeak sobre a
   versão e recusa qualquer outro texto ("client is modified").

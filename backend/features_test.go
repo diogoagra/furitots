@@ -494,8 +494,8 @@ func TestLiveFuritoVersionShown(t *testing.T) {
 	}{{emA, "FuritoVerB"}, {emB, "FuritoVerA"}, {emA, "FuritoVerA"}} {
 		waitFor(t, "ver "+c.nick+" como cliente Furito", 5*time.Second, func() bool { return seen(c.em, c.nick).Furito })
 		got := seen(c.em, c.nick)
-		if got.Version != AppVersion || got.Platform != AppVendor {
-			t.Errorf("%s aparece como %q %q, esperado %q %q", c.nick, got.Version, got.Platform, AppVersion, AppVendor)
+		if want := AppName + " " + AppVersion; got.Version != want || got.Platform != "" {
+			t.Errorf("%s aparece como %q %q, esperado %q e sem plataforma", c.nick, got.Version, got.Platform, want)
 		}
 	}
 	st, _ := emA.lastState()

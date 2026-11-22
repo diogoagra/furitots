@@ -884,10 +884,12 @@ func (c *conn) buildState() State {
 			Contact:            contacts[cl.UID],
 		}
 		// Clientes Furito anunciam a versão de verdade em client_meta_data; a
-		// versão "oficial" deles é só a assinatura exigida pelo servidor.
+		// versão "oficial" deles é só a assinatura exigida pelo servidor. Na
+		// interface aparecem como "Furito TS 1.0.1" (o sistema em que rodam
+		// não é anunciado, e o "Linux" da assinatura não é verdade).
 		if v := furitoVersion(cl.MetaData); v != "" {
 			dto.Furito = true
-			dto.Version, dto.Platform = v, AppVendor
+			dto.Version, dto.Platform = AppName+" "+v, ""
 		}
 		if v, ok := volumes[cl.UID]; ok {
 			dto.Volume = v
