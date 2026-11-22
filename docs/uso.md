@@ -26,7 +26,7 @@ e onde ficam os dados.
   Ajustes → Conexão.
 - **Sobre** (botão "i" da barra, ao lado dos Ajustes, ou Ajuda → Sobre): a
   versão do app, o autor, a licença e os créditos.
-- **Versão**: entre clientes Furito a versão aparece como "Furito TS 1.0.1".
+- **Versão**: entre clientes Furito a versão aparece como "Furito TS 1.1.0".
   Para o servidor e para os clientes oficiais continua "3.?.? [Build:
   5680278000] Linux": o servidor confere a assinatura da TeamSpeak sobre a
   versão e recusa qualquer outro texto ("client is modified").
