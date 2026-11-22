@@ -388,33 +388,41 @@ func TestScriptCallRules(t *testing.T) {
 // Mensagens e cutucadas de scripts têm limite: uma rajada curta e depois um
 // ritmo lento, para o servidor não bloquear o usuário por flood.
 func TestScriptTalkLimit(t *testing.T) {
-	var st scriptStore
-	st.load(filepath.Join(t.TempDir(), "scripts.json"), "")
+	app, _ := newTestApp(t)
+	st := app.current()
 	now := time.Now()
 	for i := 0; i < scriptTalkBurst; i++ {
-		if !st.allowTalk(now) {
+		if !st.allowScriptTalk(now) {
 			t.Fatalf("a mensagem %d da rajada deveria passar", i+1)
 		}
 	}
-	if st.allowTalk(now) || st.allowTalk(now.Add(scriptTalkEvery/2)) {
+	if st.allowScriptTalk(now) || st.allowScriptTalk(now.Add(scriptTalkEvery/2)) {
 		t.Error("depois da rajada, a próxima mensagem deveria esperar")
 	}
 	now = now.Add(scriptTalkEvery/2 + scriptTalkEvery/2 + time.Millisecond)
-	if !st.allowTalk(now) {
+	if !st.allowScriptTalk(now) {
 		t.Error("passado o intervalo, uma mensagem deveria passar")
 	}
-	if st.allowTalk(now) {
+	if st.allowScriptTalk(now) {
 		t.Error("…e só uma")
 	}
 	now = now.Add(time.Hour)
 	passed := 0
 	for i := 0; i < 20; i++ {
-		if st.allowTalk(now) {
+		if st.allowScriptTalk(now) {
 			passed++
 		}
 	}
 	if passed != scriptTalkBurst {
 		t.Errorf("depois de um tempo parado a rajada volta ao tamanho normal, sem acumular: passaram %d", passed)
+	}
+
+	// O bloqueio por flood é de cada servidor: outra conexão tem a sua reserva.
+	other := newTab(t, app)
+	for st.allowScriptTalk(now) {
+	}
+	if !other.allowScriptTalk(now) {
+		t.Error("uma conexão que gastou a reserva não deveria travar as ações em outra")
 	}
 }
 
@@ -425,24 +433,24 @@ func TestScriptEvents(t *testing.T) {
 	api := app.API()
 	ana := ts3.ClientInfo{ID: 7, Nickname: "Ana", UID: "uidAna", ChannelID: 1}
 
-	app.onClientEvent(ts3.ClientEvent{Kind: ts3.ClientJoined, Client: ana, To: 1, Reason: "switched"})
-	app.onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: 7, InvokerName: "Ana", Text: "oi"})
-	app.onPoke("Ana", "acorda")
+	app.current().onClientEvent(ts3.ClientEvent{Kind: ts3.ClientJoined, Client: ana, To: 1, Reason: "switched"})
+	app.current().onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: 7, InvokerName: "Ana", Text: "oi"})
+	app.current().onPoke("Ana", "acorda")
 	if evs := scriptEvents(em); len(evs) != 0 {
 		t.Fatalf("sem script ligado não há eventos: %+v", evs)
 	}
 
 	sc, _ := api.SaveScript(ScriptDTO{Name: "teste", Code: "//", Enabled: true})
-	app.onClientEvent(ts3.ClientEvent{Kind: ts3.ClientConnected, Client: ana, To: 1, Reason: "connected"})
-	app.onClientEvent(ts3.ClientEvent{Kind: ts3.ClientJoined, Client: ana, From: 2, To: 1, Reason: "moved", Invoker: "Admin"})
-	app.onClientEvent(ts3.ClientEvent{Kind: ts3.ClientLeft, Client: ana, From: 1, To: 2, Reason: "switched"})
-	app.onClientEvent(ts3.ClientEvent{Kind: ts3.ClientDisconnected, Client: ana, From: 1, Reason: "lost"})
-	app.onClientEvent(ts3.ClientEvent{Kind: ts3.SelfMoved, Client: ts3.ClientInfo{ID: 1, Nickname: "Eu"}, From: 1, To: 2, Reason: "switched"})
-	app.onClientEvent(ts3.ClientEvent{Kind: "outra coisa", Client: ana})
-	app.onTextMessage(ts3.TextMessage{TargetMode: 1, InvokerID: 7, InvokerName: "Ana", InvokerUID: "uidAna", Text: "oi"})
-	app.onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: 7, InvokerName: "Ana", Text: "no canal"})
-	app.onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: int(app.client.ClientID()), InvokerName: "Eu", Text: "minha própria mensagem"})
-	app.onPoke("Ana", "acorda")
+	app.current().onClientEvent(ts3.ClientEvent{Kind: ts3.ClientConnected, Client: ana, To: 1, Reason: "connected"})
+	app.current().onClientEvent(ts3.ClientEvent{Kind: ts3.ClientJoined, Client: ana, From: 2, To: 1, Reason: "moved", Invoker: "Admin"})
+	app.current().onClientEvent(ts3.ClientEvent{Kind: ts3.ClientLeft, Client: ana, From: 1, To: 2, Reason: "switched"})
+	app.current().onClientEvent(ts3.ClientEvent{Kind: ts3.ClientDisconnected, Client: ana, From: 1, Reason: "lost"})
+	app.current().onClientEvent(ts3.ClientEvent{Kind: ts3.SelfMoved, Client: ts3.ClientInfo{ID: 1, Nickname: "Eu"}, From: 1, To: 2, Reason: "switched"})
+	app.current().onClientEvent(ts3.ClientEvent{Kind: "outra coisa", Client: ana})
+	app.current().onTextMessage(ts3.TextMessage{TargetMode: 1, InvokerID: 7, InvokerName: "Ana", InvokerUID: "uidAna", Text: "oi"})
+	app.current().onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: 7, InvokerName: "Ana", Text: "no canal"})
+	app.current().onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: int(app.current().client.ClientID()), InvokerName: "Eu", Text: "minha própria mensagem"})
+	app.current().onPoke("Ana", "acorda")
 
 	evs := scriptEvents(em)
 	var got []string
@@ -485,13 +493,13 @@ func TestScriptEvents(t *testing.T) {
 
 	// contato bloqueado: as mensagens dele não chegam aos scripts
 	app.updateSettings(func(s *Settings) { s.Contacts = map[string]string{"uidChato": "blocked"} })
-	app.onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: 9, InvokerName: "Chato", InvokerUID: "uidChato", Text: "spam"})
+	app.current().onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: 9, InvokerName: "Chato", InvokerUID: "uidChato", Text: "spam"})
 	if n := len(scriptEvents(em)); n != len(evs) {
 		t.Error("mensagem de contato bloqueado não deveria virar evento")
 	}
 
 	api.SetScriptEnabled(sc.ID, false)
-	app.onPoke("Ana", "de novo")
+	app.current().onPoke("Ana", "de novo")
 	if n := len(scriptEvents(em)); n != len(evs) {
 		t.Error("com o script desligado os eventos param")
 	}
@@ -739,9 +747,10 @@ func TestLiveScriptModeration(t *testing.T) {
 	}
 	call := func(action string, args map[string]any) error {
 		// o limite contra flood tem teste próprio; aqui cada passo começa com folga
-		admin.scripts.mu.Lock()
-		admin.scripts.talkTokens = scriptTalkBurst
-		admin.scripts.mu.Unlock()
+		c := admin.current()
+		c.talkMu.Lock()
+		c.talkLast = time.Time{} // reserva cheia de novo
+		c.talkMu.Unlock()
 		_, err := api.ScriptCall(sc.ID, action, args)
 		return err
 	}

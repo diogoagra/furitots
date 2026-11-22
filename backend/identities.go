@@ -170,56 +170,61 @@ func (a *App) saveIdentitiesLocked() error {
 }
 
 // identityDTO descreve a identidade em uso.
-func (a *App) identityDTO() IdentityDTO {
-	a.identMu.Lock()
-	defer a.identMu.Unlock()
-	dto := IdentityDTO{ID: a.identActive, UID: a.identity.Uid, SecurityLevel: a.identity.SecurityLevel()}
-	if e := findIdentity(a.idents, a.identActive); e != nil {
+func (c *conn) identityDTO() IdentityDTO {
+	c.app.identMu.Lock()
+	defer c.app.identMu.Unlock()
+	dto := IdentityDTO{ID: c.identID, UID: c.identity.Uid, SecurityLevel: c.identity.SecurityLevel()}
+	if e := findIdentity(c.app.idents, c.identID); e != nil {
 		dto.Name = e.Name
 	}
 	return dto
 }
 
 func (a *App) identityList() []IdentityEntryDTO {
+	conns := a.connList()
 	a.identMu.Lock()
 	defer a.identMu.Unlock()
+	inUse := make(map[string]bool, len(conns))
+	for _, c := range conns {
+		inUse[c.identID] = true
+	}
 	out := make([]IdentityEntryDTO, 0, len(a.idents))
 	for _, e := range a.idents {
 		out = append(out, IdentityEntryDTO{
 			ID: e.ID, Name: e.Name, Nickname: e.Nickname, UID: e.Ident.Uid, SecurityLevel: e.Ident.SecurityLevel(),
-			IsDefault: e.ID == a.identDefault, InUse: e.ID == a.identActive,
+			IsDefault: e.ID == a.identDefault, InUse: inUse[e.ID],
 		})
 	}
 	return out
 }
 
-func (a *App) idle() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.status == statusDisconnected
+func (c *conn) idle() bool {
+	c.app.mu.Lock()
+	defer c.app.mu.Unlock()
+	return c.status == statusDisconnected
 }
 
 // useIdentity põe a identidade id ("" = a padrão) em uso na próxima conexão.
 // Trocar de identidade encerra a conexão atual.
-func (a *App) useIdentity(id string) error {
-	a.identMu.Lock()
+func (c *conn) useIdentity(id string) error {
+	c.app.identMu.Lock()
 	if id == "" {
-		id = a.identDefault
+		id = c.app.identDefault
 	}
-	e := findIdentity(a.idents, id)
-	same := e != nil && a.identActive == e.ID
-	a.identMu.Unlock()
+	e := findIdentity(c.app.idents, id)
+	same := e != nil && c.identID == e.ID
+	c.app.identMu.Unlock()
 	if e == nil {
 		return errors.New("identidade não encontrada (ela pode ter sido apagada)")
 	}
 	if same {
 		return nil
 	}
-	a.client.SetIdentity(e.Ident) // desconecta, se houver conexão
-	a.identMu.Lock()
-	a.identity, a.identActive = e.Ident, e.ID
-	a.identMu.Unlock()
-	a.markDirty()
+	c.client.SetIdentity(e.Ident) // desconecta, se houver conexão
+	c.app.identMu.Lock()
+	c.identity, c.identID = e.Ident, e.ID
+	c.app.identMu.Unlock()
+	c.markDirty()
 	return nil
 }
 
@@ -308,8 +313,12 @@ func (api *API) SetDefaultIdentity(id string) error {
 		return err
 	}
 	a.markDirty()
-	if a.idle() {
-		return a.useIdentity(id)
+	for _, c := range a.connList() {
+		if c.idle() {
+			if err := c.useIdentity(id); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -319,7 +328,11 @@ func (api *API) SetDefaultIdentity(id string) error {
 // podem ser apagadas.
 func (api *API) DeleteIdentity(id string) error {
 	a := api.app
-	idle := a.idle()
+	conns := a.connList()
+	busy := make(map[*conn]bool, len(conns))
+	for _, c := range conns {
+		busy[c] = !c.idle()
+	}
 	a.identMu.Lock()
 	if findIdentity(a.idents, id) == nil {
 		a.identMu.Unlock()
@@ -329,9 +342,11 @@ func (api *API) DeleteIdentity(id string) error {
 		a.identMu.Unlock()
 		return errors.New("esta é a única identidade; crie ou importe outra antes de apagá-la")
 	}
-	if id == a.identActive && !idle {
-		a.identMu.Unlock()
-		return errors.New("esta identidade está em uso na conexão atual; desconecte antes de apagá-la")
+	for _, c := range conns {
+		if c.identID == id && busy[c] {
+			a.identMu.Unlock()
+			return errors.New("esta identidade está em uso numa conexão aberta; desconecte antes de apagá-la")
+		}
 	}
 	oldList, oldDef := a.idents, a.identDefault
 	kept := make([]*identityEntry, 0, len(a.idents)-1)
@@ -349,12 +364,19 @@ func (api *API) DeleteIdentity(id string) error {
 		a.identMu.Unlock()
 		return err
 	}
-	wasActive := id == a.identActive
+	var orphans []*conn // conexões paradas que usavam a identidade apagada
+	for _, c := range conns {
+		if c.identID == id {
+			orphans = append(orphans, c)
+		}
+	}
 	def := a.identDefault
 	a.identMu.Unlock()
 	a.markDirty()
-	if wasActive {
-		return a.useIdentity(def)
+	for _, c := range orphans {
+		if err := c.useIdentity(def); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -369,7 +391,7 @@ func (api *API) ExportIdentity(id string) (string, error) {
 	}
 	a.identMu.Lock()
 	if id == "" {
-		id = a.identActive
+		id = api.c.identID
 	}
 	e := findIdentity(a.idents, id)
 	a.identMu.Unlock()
@@ -482,7 +504,7 @@ func (api *API) ImproveIdentity(id string, level int) (int, error) {
 	a := api.app
 	a.identMu.Lock()
 	if id == "" {
-		id = a.identActive
+		id = api.c.identID
 	}
 	e := findIdentity(a.idents, id)
 	if e == nil {

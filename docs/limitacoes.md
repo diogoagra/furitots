@@ -6,8 +6,17 @@ O que o app ainda não faz ou faz com ressalvas. O que está planejado fica em
 - O servidor não é autenticado pelo app (o cliente oficial também não guarda
   a identidade dos servidores): quem está no caminho da rede no momento da
   conexão consegue se passar por ele. Ver [seguranca.md](seguranca.md).
-- Uma conexão por vez (sem abas de vários servidores), sem definir o próprio avatar e sem
-  lista de banimentos; permissões só por grupo (não por canal ou por cliente).
+- Sem definir o próprio avatar e sem lista de banimentos; permissões só por
+  grupo (não por canal ou por cliente).
+- Vários servidores (abas): fala-se em um servidor por vez; mutar o microfone,
+  mutar os alto-falantes e o status ausente valem para todos de uma vez (por
+  servidor só há "silenciar esta aba"); no máximo 8 abas; as abas não são
+  reabertas ao iniciar o app. O microfone não muda de servidor sozinho: se
+  você sair do servidor em que falava e sobrarem dois ou mais, ninguém ouve
+  você até escolher a aba. Das abas que não estão à vista só tocam os avisos
+  que são com você (cutucada, ser movido, expulso ou banido, a conexão cair
+  ou voltar). Conferido com dois servidores TeamSpeak 6 de teste e por
+  medição; ouvir dois servidores ao mesmo tempo não foi julgado de ouvido.
 - Arquivos de canal são carregados inteiros na memória (limite de 256 MB).
 - Scripts: rodam dentro da janela do app, então valem enquanto ele está
   aberto; com a janela minimizada por muito tempo, o sistema pode atrasar os
@@ -27,4 +36,4 @@ O que o app ainda não faz ou faz com ressalvas. O que está planejado fica em
 - O app de `make mac` depende do `libopus`/`libopusfile` do Homebrew e só roda no Mac em que foi gerado; para levar a outro Mac, `make mac-dist` põe as bibliotecas dentro dele.
 - Fone Bluetooth usado também como microfone: ao abrir o microfone do fone, o macOS o passa para o modo de chamada e todo o som fica com qualidade de telefone. É do Bluetooth, não do app; para manter a qualidade, escolha outro microfone em Ajustes → Áudio.
 - Compartilhamento de tela: só entre clientes Furito (não é compatível com o do cliente TeamSpeak 6), sem áudio do sistema, e a conexão direta revela o IP entre os participantes (ver a seção própria).
-- A versão mostrada pelos clientes oficiais continua a assinada ("3.?.? … Linux"); "1.0.1 Diogo Agra" só aparece entre clientes Furito.
+- A versão mostrada pelos clientes oficiais continua a assinada ("3.?.? … Linux"); "Furito TS 1.0.1" só aparece entre clientes Furito.

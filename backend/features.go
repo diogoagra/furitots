@@ -130,6 +130,8 @@ type FileEntryDTO struct {
 }
 
 type PokeDTO struct {
+	Tab      int    `json:"tab"`    // a aba (o servidor) em que fomos cutucados
+	Server   string `json:"server"` // nome desse servidor
 	FromName string `json:"fromName"`
 	Message  string `json:"message"`
 }
@@ -146,8 +148,8 @@ func (a *App) SetSavePicker(p SavePicker) { a.savePicker.Store(&p) }
 // ---------------------------------------------------------------- clientes
 
 // clientByID acha um cliente visível pelo id da conexão.
-func (a *App) clientByID(clientID int) (ts3.ClientInfo, error) {
-	for _, cl := range a.client.Snapshot().Clients {
+func (c *conn) clientByID(clientID int) (ts3.ClientInfo, error) {
+	for _, cl := range c.client.Snapshot().Clients {
 		if int(cl.ID) == clientID {
 			return cl, nil
 		}
@@ -156,7 +158,7 @@ func (a *App) clientByID(clientID int) (ts3.ClientInfo, error) {
 }
 
 func (api *API) SetClientVolume(clientID int, percent float64) error {
-	cl, err := api.app.clientByID(clientID)
+	cl, err := api.c.clientByID(clientID)
 	if err != nil {
 		return err
 	}
@@ -177,7 +179,7 @@ func (api *API) SetClientVolume(clientID int, percent float64) error {
 }
 
 func (api *API) SetClientMuted(clientID int, muted bool) error {
-	cl, err := api.app.clientByID(clientID)
+	cl, err := api.c.clientByID(clientID)
 	if err != nil {
 		return err
 	}
@@ -194,7 +196,7 @@ func (api *API) SetClientMuted(clientID int, muted bool) error {
 // SetContact marca um cliente como amigo, bloqueado ou nenhum dos dois.
 // Bloqueados ficam mudos para nós e as mensagens deles são ignoradas.
 func (api *API) SetContact(clientID int, status string) error {
-	cl, err := api.app.clientByID(clientID)
+	cl, err := api.c.clientByID(clientID)
 	if err != nil {
 		return err
 	}
@@ -212,61 +214,61 @@ func (api *API) SetContact(clientID int, status string) error {
 }
 
 func (api *API) MoveClient(clientID, channelID int, password string) error {
-	return api.app.client.MoveClient(uint16(clientID), channelID, password)
+	return api.c.client.MoveClient(uint16(clientID), channelID, password)
 }
 
 func (api *API) KickClient(clientID int, fromServer bool, reason string) error {
-	return api.app.client.KickClient(uint16(clientID), fromServer, reason)
+	return api.c.client.KickClient(uint16(clientID), fromServer, reason)
 }
 
 func (api *API) BanClient(clientID, seconds int, reason string) error {
 	if seconds < 0 {
 		seconds = 0
 	}
-	return api.app.client.BanClient(uint16(clientID), seconds, reason)
+	return api.c.client.BanClient(uint16(clientID), seconds, reason)
 }
 
 func (api *API) PokeClient(clientID int, message string) error {
-	return api.app.client.PokeClient(uint16(clientID), message)
+	return api.c.client.PokeClient(uint16(clientID), message)
 }
 
 func (api *API) SetClientTalker(clientID int, on bool) error {
-	return api.app.client.SetClientTalker(uint16(clientID), on)
+	return api.c.client.SetClientTalker(uint16(clientID), on)
 }
 
 func (api *API) RequestTalk(on bool, message string) error {
-	return api.app.client.RequestTalk(on, message)
+	return api.c.client.RequestTalk(on, message)
 }
 
 func (api *API) AddServerGroup(clientID, groupID int) error {
-	cl, err := api.app.clientByID(clientID)
+	cl, err := api.c.clientByID(clientID)
 	if err != nil {
 		return err
 	}
-	return api.app.client.AddServerGroup(cl.DatabaseID, groupID)
+	return api.c.client.AddServerGroup(cl.DatabaseID, groupID)
 }
 
 func (api *API) RemoveServerGroup(clientID, groupID int) error {
-	cl, err := api.app.clientByID(clientID)
+	cl, err := api.c.clientByID(clientID)
 	if err != nil {
 		return err
 	}
-	return api.app.client.RemoveServerGroup(cl.DatabaseID, groupID)
+	return api.c.client.RemoveServerGroup(cl.DatabaseID, groupID)
 }
 
 func (api *API) SetChannelGroup(clientID, groupID int) error {
-	cl, err := api.app.clientByID(clientID)
+	cl, err := api.c.clientByID(clientID)
 	if err != nil {
 		return err
 	}
-	return api.app.client.SetChannelGroup(cl.DatabaseID, cl.ChannelID, groupID)
+	return api.c.client.SetChannelGroup(cl.DatabaseID, cl.ChannelID, groupID)
 }
 
 // SetWhisperTarget passa a enviar a voz só para um cliente ou canal
 // (sussurro) em vez do canal atual. kind "" volta ao normal.
 func (api *API) SetWhisperTarget(kind string, id int) error {
 	w := WhisperDTO{}
-	snap := api.app.client.Snapshot()
+	snap := api.c.client.Snapshot()
 	switch kind {
 	case "client":
 		for _, cl := range snap.Clients {
@@ -287,23 +289,52 @@ func (api *API) SetWhisperTarget(kind string, id int) error {
 	if kind != "" && w.Kind == "" {
 		return errors.New("alvo do sussurro não encontrado")
 	}
-	api.app.whisper.Store(&w)
+	api.c.whisper.Store(&w)
 	api.app.markDirty()
 	return nil
 }
 
-// sendVoice manda um quadro de voz: para o canal ou, sussurrando, só para o alvo.
+// talker devolve a conexão em que falamos: é para o servidor dela que vai o
+// que o microfone capta. nil = nenhuma.
+func (a *App) talker() *conn { return a.mic.Load() }
+
+// setMic passa o microfone para a conexão c (nil = nenhuma). O motor de áudio
+// é avisado antes de o destino mudar aqui: é ele quem entrega o fim da fala em
+// andamento, e esse fim tem de chegar ao servidor antigo.
+func (a *App) setMic(c *conn) {
+	if c != nil {
+		a.engine.SetTxConn(c.audioID(), true)
+	} else {
+		a.engine.SetTxConn(0, false)
+	}
+	old := a.mic.Swap(c)
+	if old != nil && old != c {
+		old.client.SetInputHardware(false)
+	}
+	if c != nil {
+		c.client.SetInputHardware(true)
+	}
+	a.applyBitrate()
+	a.markDirty()
+}
+
+// sendVoice manda um quadro de voz ao servidor em que falamos: para o canal
+// ou, sussurrando, só para o alvo.
 func (a *App) sendVoice(opusData []byte) {
-	codec := byte(a.codec.Load())
-	w := a.whisper.Load()
+	c := a.talker()
+	if c == nil {
+		return
+	}
+	codec := byte(c.codec.Load())
+	w := c.whisper.Load()
 	if w == nil || w.Kind == "" {
-		a.client.SendVoice(opusData, codec)
+		c.client.SendVoice(opusData, codec)
 		return
 	}
 	if w.Kind == "client" {
-		a.client.SendWhisper(opusData, codec, []uint16{uint16(w.ID)}, nil)
+		c.client.SendWhisper(opusData, codec, []uint16{uint16(w.ID)}, nil)
 	} else {
-		a.client.SendWhisper(opusData, codec, nil, []int{w.ID})
+		c.client.SendWhisper(opusData, codec, nil, []int{w.ID})
 	}
 }
 
@@ -314,7 +345,7 @@ func (api *API) CreateChannel(spec ChannelSpec) error {
 	if err != nil {
 		return err
 	}
-	return api.app.client.CreateChannel(s)
+	return api.c.client.CreateChannel(s)
 }
 
 func (api *API) EditChannel(channelID int, spec ChannelSpec) error {
@@ -322,15 +353,15 @@ func (api *API) EditChannel(channelID int, spec ChannelSpec) error {
 	if err != nil {
 		return err
 	}
-	return api.app.client.EditChannel(channelID, s)
+	return api.c.client.EditChannel(channelID, s)
 }
 
 func (api *API) DeleteChannel(channelID int) error {
-	return api.app.client.DeleteChannel(channelID)
+	return api.c.client.DeleteChannel(channelID)
 }
 
 func (api *API) GetGroupPermissions(kind string, groupID int) ([]PermDTO, error) {
-	perms, err := api.app.client.GroupPermissions(kind == "server", groupID)
+	perms, err := api.c.client.GroupPermissions(kind == "server", groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -346,11 +377,11 @@ func (api *API) SetGroupPermission(kind string, groupID int, name string, value 
 	if name == "" {
 		return errors.New("informe o nome da permissão")
 	}
-	return api.app.client.SetGroupPermission(kind == "server", groupID, ts3.Permission{Name: name, Value: value, Negated: negated, Skip: skip})
+	return api.c.client.SetGroupPermission(kind == "server", groupID, ts3.Permission{Name: name, Value: value, Negated: negated, Skip: skip})
 }
 
 func (api *API) RemoveGroupPermission(kind string, groupID int, name string) error {
-	return api.app.client.RemoveGroupPermission(kind == "server", groupID, name)
+	return api.c.client.RemoveGroupPermission(kind == "server", groupID, name)
 }
 
 // ---------------------------------------------------------------- arquivos do canal
@@ -361,7 +392,7 @@ func cleanRemotePath(p string) string {
 }
 
 func (api *API) ListChannelFiles(channelID int, dir, password string) ([]FileEntryDTO, error) {
-	files, err := api.app.client.ListFiles(channelID, cleanRemotePath(dir), password)
+	files, err := api.c.client.ListFiles(channelID, cleanRemotePath(dir), password)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +415,7 @@ func (api *API) DownloadChannelFile(channelID int, remote, password string) (str
 	if err != nil || target == "" {
 		return "", err
 	}
-	data, err := api.app.client.DownloadFile(channelID, remote, password)
+	data, err := api.c.client.DownloadFile(channelID, remote, password)
 	if err != nil {
 		return "", err
 	}
@@ -404,10 +435,10 @@ func (api *API) UploadChannelFile(channelID int, dir, password string) (int, err
 	if err != nil || len(paths) == 0 {
 		return 0, err
 	}
-	return api.app.uploadFiles(channelID, dir, password, paths)
+	return api.c.uploadFiles(channelID, dir, password, paths)
 }
 
-func (a *App) uploadFiles(channelID int, dir, password string, paths []string) (int, error) {
+func (c *conn) uploadFiles(channelID int, dir, password string, paths []string) (int, error) {
 	sent := 0
 	for _, local := range paths {
 		info, err := os.Stat(local)
@@ -422,7 +453,7 @@ func (a *App) uploadFiles(channelID int, dir, password string, paths []string) (
 			return sent, err
 		}
 		remote := cleanRemotePath(path.Join(dir, filepath.Base(local)))
-		if err := a.client.UploadFile(channelID, remote, password, data); err != nil {
+		if err := c.client.UploadFile(channelID, remote, password, data); err != nil {
 			return sent, err
 		}
 		sent++
@@ -431,11 +462,11 @@ func (a *App) uploadFiles(channelID int, dir, password string, paths []string) (
 }
 
 func (api *API) DeleteChannelFile(channelID int, remote, password string) error {
-	return api.app.client.DeleteFile(channelID, cleanRemotePath(remote), password)
+	return api.c.client.DeleteFile(channelID, cleanRemotePath(remote), password)
 }
 
 func (api *API) CreateChannelDirectory(channelID int, remote, password string) error {
-	return api.app.client.CreateDirectory(channelID, cleanRemotePath(remote), password)
+	return api.c.client.CreateDirectory(channelID, cleanRemotePath(remote), password)
 }
 
 // ---------------------------------------------------------------- apelido, chave, identidade
@@ -443,8 +474,8 @@ func (api *API) CreateChannelDirectory(channelID int, remote, password string) e
 // SetNickname troca o apelido (agora, se conectado, e nas próximas conexões).
 func (api *API) SetNickname(name string) error {
 	name = ts3.NormalizeNickname(name)
-	if api.app.client.IsConnected() {
-		if err := api.app.client.SetNickname(name); err != nil {
+	if api.c.client.IsConnected() {
+		if err := api.c.client.SetNickname(name); err != nil {
 			return err
 		}
 	}
@@ -457,7 +488,7 @@ func (api *API) UsePrivilegeKey(key string) error {
 	if key == "" {
 		return errors.New("informe a chave de privilégio")
 	}
-	return api.app.client.UsePrivilegeKey(key)
+	return api.c.client.UsePrivilegeKey(key)
 }
 
 // ---------------------------------------------------------------- favoritos e reconexão
@@ -498,23 +529,32 @@ func (api *API) DeleteBookmark(id string) {
 }
 
 func (api *API) ConnectBookmark(id string) error {
-	api.app.mu.Lock()
+	req, err := api.app.bookmarkRequest(id)
+	if err != nil {
+		return err
+	}
+	return api.c.connect(req)
+}
+
+// bookmarkRequest monta o pedido de conexão de um favorito.
+func (a *App) bookmarkRequest(id string) (ConnectRequest, error) {
+	a.mu.Lock()
 	var found *Bookmark
-	for i := range api.app.settings.Bookmarks {
-		if api.app.settings.Bookmarks[i].ID == id {
-			b := api.app.settings.Bookmarks[i]
+	for i := range a.settings.Bookmarks {
+		if a.settings.Bookmarks[i].ID == id {
+			b := a.settings.Bookmarks[i]
 			found = &b
 		}
 	}
-	nickname := api.app.settings.Nickname
-	api.app.mu.Unlock()
+	nickname := a.settings.Nickname
+	a.mu.Unlock()
 	if found == nil {
-		return errors.New("favorito não encontrado")
+		return ConnectRequest{}, errors.New("favorito não encontrado")
 	}
 	if found.Nickname != "" {
 		nickname = found.Nickname
 	}
-	return api.app.connect(ConnectRequest{Host: found.Host, Nickname: nickname, DefaultChannel: found.DefaultChannel, IdentityID: found.IdentityID})
+	return ConnectRequest{Host: found.Host, Nickname: nickname, DefaultChannel: found.DefaultChannel, IdentityID: found.IdentityID}, nil
 }
 
 // Modos de Settings.RemoteImages.
@@ -540,8 +580,8 @@ func (api *API) SetRemoteImages(mode string) error {
 // SetServerImages liga ou desliga o carregamento automático das imagens no
 // servidor em que estamos (guardado pela identidade do servidor).
 func (api *API) SetServerImages(on bool) error {
-	uid := api.app.client.Snapshot().Server.UID
-	if !api.app.client.IsConnected() || uid == "" {
+	uid := api.c.client.Snapshot().Server.UID
+	if !api.c.client.IsConnected() || uid == "" {
 		return errors.New("conecte-se ao servidor para escolher isto")
 	}
 	api.app.updateSettings(func(s *Settings) {
@@ -563,34 +603,36 @@ func (api *API) SetPokePopup(on bool) {
 func (api *API) SetAutoReconnect(on bool) {
 	api.app.updateSettings(func(s *Settings) { s.AutoReconnect = on })
 	if !on {
-		api.app.cancelReconnect(false)
+		for _, c := range api.app.connList() {
+			c.cancelReconnect(false)
+		}
 	}
 }
 
 // cancelReconnect interrompe as tentativas de reconexão. userAction indica
 // que foi o usuário quem pediu para desconectar.
-func (a *App) cancelReconnect(userAction bool) {
-	a.mu.Lock()
-	if a.reconnectTimer != nil {
-		a.reconnectTimer.Stop()
-		a.reconnectTimer = nil
+func (c *conn) cancelReconnect(userAction bool) {
+	c.app.mu.Lock()
+	if c.reconnectTimer != nil {
+		c.reconnectTimer.Stop()
+		c.reconnectTimer = nil
 	}
-	a.reconnectAttempt = 0
+	c.reconnectAttempt = 0
 	if userAction {
-		a.userDisconnect = true
+		c.userDisconnect = true
 	}
-	if a.status == statusReconnecting {
-		a.status = statusDisconnected
+	if c.status == statusReconnecting {
+		c.status = statusDisconnected
 	}
-	a.mu.Unlock()
-	a.markDirty()
+	c.app.mu.Unlock()
+	c.markDirty()
 }
 
 // scheduleReconnectLocked agenda a próxima tentativa, com espera crescente.
 // reason é o motivo da última falha. Chamar com a.mu travado. Devolve a espera.
-func (a *App) scheduleReconnectLocked(reason string) time.Duration {
-	a.reconnectAttempt++
-	delay := time.Duration(1<<min(a.reconnectAttempt, 5)) * time.Second // 2, 4, 8, 16, 32 s
+func (c *conn) scheduleReconnectLocked(reason string) time.Duration {
+	c.reconnectAttempt++
+	delay := time.Duration(1<<min(c.reconnectAttempt, 5)) * time.Second // 2, 4, 8, 16, 32 s
 	if delay > 30*time.Second {
 		delay = 30 * time.Second
 	}
@@ -602,29 +644,26 @@ func (a *App) scheduleReconnectLocked(reason string) time.Duration {
 	if strings.Contains(reason, "flood") {
 		delay = 30 * time.Second
 	}
-	if a.opts.ReconnectDelay > 0 {
-		delay = a.opts.ReconnectDelay
+	if c.app.opts.ReconnectDelay > 0 {
+		delay = c.app.opts.ReconnectDelay
 	}
-	a.status = statusReconnecting
-	a.reconnectTimer = time.AfterFunc(delay, a.reconnectNow)
+	c.status = statusReconnecting
+	c.reconnectTimer = time.AfterFunc(delay, c.reconnectNow)
 	return delay
 }
 
-func (a *App) reconnectNow() {
-	a.mu.Lock()
-	if a.status != statusReconnecting || a.userDisconnect {
-		a.mu.Unlock()
+func (c *conn) reconnectNow() {
+	c.app.mu.Lock()
+	if c.status != statusReconnecting || c.userDisconnect {
+		c.app.mu.Unlock()
 		return
 	}
-	req := a.lastRequest
-	a.mu.Unlock()
+	req := c.lastRequest
+	c.app.mu.Unlock()
 
-	err := a.client.Connect(ts3.ConnectOptions{
-		Host: req.Host, Nickname: ts3.NormalizeNickname(req.Nickname), ServerPassword: req.ServerPassword,
-		DefaultChannel: req.DefaultChannel, ChannelPassword: req.ChannelPassword,
-	})
+	err := c.client.Connect(connectOptions(req))
 	if err != nil {
-		a.onDisconnected(err.Error(), true) // conta como tentativa falha
+		c.onDisconnected(err.Error(), true) // conta como tentativa falha
 	}
 }
 
@@ -770,21 +809,21 @@ func (a *App) historyFile(key string) string {
 
 // saveHistory acrescenta uma mensagem de canal ou de servidor ao histórico
 // do servidor atual.
-func (a *App) saveHistory(m Message) {
-	a.mu.Lock()
-	key := a.historyKey
-	a.mu.Unlock()
+func (c *conn) saveHistory(m Message) {
+	c.app.mu.Lock()
+	key := c.historyKey
+	c.app.mu.Unlock()
 	if key == "" || m.Kind != "chat" || (m.TargetMode != 2 && m.TargetMode != 3) {
 		return
 	}
 	line, err := json.Marshal(historyLine{Time: m.Time, TargetMode: m.TargetMode,
 		InvokerName: clipBytes(m.InvokerName, maxHistoryName), Text: clipBytes(m.Text, maxHistoryText), Self: m.Self})
-	if err != nil || os.MkdirAll(a.historyDir, 0o700) != nil {
+	if err != nil || os.MkdirAll(c.app.historyDir, 0o700) != nil {
 		return
 	}
-	a.historyMu.Lock()
-	defer a.historyMu.Unlock()
-	file := a.historyFile(key)
+	c.app.historyMu.Lock()
+	defer c.app.historyMu.Unlock()
+	file := c.app.historyFile(key)
 	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
@@ -826,12 +865,12 @@ func trimHistory(file string) {
 }
 
 // loadHistory entrega à interface as últimas mensagens guardadas do servidor.
-func (a *App) loadHistory(key string) {
-	a.historyMu.Lock()
-	lines := readHistory(a.historyFile(key))
-	a.historyMu.Unlock()
+func (c *conn) loadHistory(key string) {
+	c.app.historyMu.Lock()
+	lines := readHistory(c.app.historyFile(key))
+	c.app.historyMu.Unlock()
 	for _, l := range lines {
-		a.addMessage(Message{Kind: "chat", Level: "info", History: true, HistoryTime: l.Time,
+		c.addMessage(Message{Kind: "chat", Level: "info", History: true, HistoryTime: l.Time,
 			TargetMode: l.TargetMode, InvokerName: l.InvokerName, Text: l.Text, Self: l.Self})
 	}
 }

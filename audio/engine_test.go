@@ -589,10 +589,10 @@ func TestRecordingMixesBothSides(t *testing.T) {
 	e.SetNoiseMode(NoiseOff)
 	e.SetNormalizeVoices(false)
 	path := filepath.Join(t.TempDir(), "conversa.wav")
-	if err := e.StartRecording(path); err != nil {
+	if err := e.StartRecording(path, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.StartRecording(path); err == nil {
+	if err := e.StartRecording(path, 0); err == nil {
 		t.Error("duas gravações ao mesmo tempo deveriam ser recusadas")
 	}
 	if e.RecordingSince().IsZero() {
@@ -603,7 +603,7 @@ func TestRecordingMixesBothSides(t *testing.T) {
 	var micPhase, noticePhase float64
 	play := make([]int16, FrameSize)
 	for f := 0; f < 100; f++ {
-		e.PushVoice(7, uint16(f), other[f])
+		e.PushVoice(0, 7, uint16(f), other[f])
 		e.txFrame(sine(FrameSize, 300, 5000, &micPhase)) // nós, em 300 Hz
 		if f == 20 {
 			e.PlayLocal(sine(SampleRate/2, 3000, 8000, &noticePhase)) // aviso local em 3 kHz
@@ -1109,9 +1109,11 @@ func TestPerClientVolumeAndMute(t *testing.T) {
 	e.SetNormalizeVoices(false)
 	frames := encodeFrames(t, 10, false)
 	level := func() float64 {
-		e.ResetStreams()
+		e.rxMu.Lock()
+		e.dropStreamsLocked(0) // só o áudio pendente: ResetStreams esqueceria também o volume escolhido
+		e.rxMu.Unlock()
 		for i, f := range frames {
-			e.PushVoice(6, uint16(i), f)
+			e.PushVoice(0, 6, uint16(i), f)
 		}
 		out := make([]int16, FrameSize)
 		var max float64
@@ -1122,12 +1124,12 @@ func TestPerClientVolumeAndMute(t *testing.T) {
 		return max
 	}
 	normal := level()
-	e.SetClientGain(6, 0.5)
+	e.SetClientGain(0, 6, 0.5)
 	half := level()
-	e.SetClientGain(6, 1)
-	e.SetClientMuted(6, true)
+	e.SetClientGain(0, 6, 1)
+	e.SetClientMuted(0, 6, true)
 	muted := level()
-	e.SetClientMuted(6, false)
+	e.SetClientMuted(0, 6, false)
 	back := level()
 	if half < normal*0.4 || half > normal*0.6 || muted != 0 || math.Abs(back-normal) > normal*0.05 {
 		t.Errorf("normal=%.0f metade=%.0f mutado=%.0f de volta=%.0f", normal, half, muted, back)
@@ -1150,7 +1152,7 @@ func TestMicTestLoopback(t *testing.T) {
 	}
 
 	e.SetMicTest(false)
-	e.ResetStreams()
+	e.ResetStreams(0)
 	play := make([]int16, FrameSize)
 	for i := 0; i < 10; i++ {
 		e.txFrame(v.nextPCM(FrameSize))
@@ -1212,10 +1214,10 @@ func TestJitterBufferBoundsLatency(t *testing.T) {
 	e, _ := newTestEngine(t)
 	frames := encodeFrames(t, 100, false)
 	for i, f := range frames { // 2 s de áudio chegando de uma vez
-		e.PushVoice(7, uint16(i), f)
+		e.PushVoice(0, 7, uint16(i), f)
 	}
 	e.rxMu.Lock()
-	queued := len(e.streams[7].pcm)
+	queued := len(e.streams[voiceKey{0, 7}].pcm)
 	e.rxMu.Unlock()
 	if queued > maxQueueSamples {
 		t.Fatalf("fila com %d amostras (%.0f ms); limite %d", queued, float64(queued)/48, maxQueueSamples)
@@ -1227,13 +1229,13 @@ func TestPlaybackPrebufferAndTalking(t *testing.T) {
 	frames := encodeFrames(t, 12, false)
 	out := make([]int16, FrameSize)
 
-	e.PushVoice(3, 0, frames[0])
+	e.PushVoice(0, 3, 0, frames[0])
 	e.fillPlayback(out)
-	if len(e.TalkingClients()) != 0 {
+	if len(e.TalkingClients(0)) != 0 {
 		t.Error("não deve tocar antes de acumular o pré-buffer")
 	}
 	for i := 1; i < 12; i++ {
-		e.PushVoice(3, uint16(i), frames[i])
+		e.PushVoice(0, 3, uint16(i), frames[i])
 	}
 	loud := 0
 	for i := 0; i < 12; i++ {
@@ -1242,7 +1244,7 @@ func TestPlaybackPrebufferAndTalking(t *testing.T) {
 			loud++
 		}
 		if i == 3 {
-			if ids := e.TalkingClients(); len(ids) != 1 || ids[0] != 3 {
+			if ids := e.TalkingClients(0); len(ids) != 1 || ids[0] != 3 {
 				t.Errorf("talking = %v", ids)
 			}
 		}
@@ -1250,9 +1252,9 @@ func TestPlaybackPrebufferAndTalking(t *testing.T) {
 	if loud < 10 {
 		t.Errorf("tocou só %d quadros de 12", loud)
 	}
-	e.PushVoice(3, 12, nil) // fim da fala
+	e.PushVoice(0, 3, 12, nil) // fim da fala
 	e.fillPlayback(out)
-	if len(e.TalkingClients()) != 0 {
+	if len(e.TalkingClients(0)) != 0 {
 		t.Error("indicador deve apagar ao fim da fala")
 	}
 }
@@ -1262,10 +1264,10 @@ func TestLostPacketIsConcealed(t *testing.T) {
 	e, _ := newTestEngine(t)
 	frames := encodeFrames(t, 6, true)
 	for _, i := range []int{0, 1, 2, 4, 5} { // o pacote 3 se perdeu
-		e.PushVoice(8, uint16(i), frames[i])
+		e.PushVoice(0, 8, uint16(i), frames[i])
 	}
 	e.rxMu.Lock()
-	queued := len(e.streams[8].pcm)
+	queued := len(e.streams[voiceKey{0, 8}].pcm)
 	e.rxMu.Unlock()
 	if queued != 6*FrameSize {
 		t.Errorf("fila com %d amostras; esperado %d (5 pacotes + 1 reconstruído)", queued, 6*FrameSize)
@@ -1280,11 +1282,11 @@ func TestAdaptivePrebuffer(t *testing.T) {
 	prebuffer := func() int {
 		e.rxMu.Lock()
 		defer e.rxMu.Unlock()
-		return e.streams[4].prebuffer
+		return e.streams[voiceKey{0, 4}].prebuffer
 	}
 
 	for i := 0; i < 3; i++ {
-		e.PushVoice(4, uint16(i), frames[i])
+		e.PushVoice(0, 4, uint16(i), frames[i])
 	}
 	for i := 0; i < 4; i++ { // consome tudo sem ter chegado o fim da fala
 		e.fillPlayback(out)
@@ -1294,9 +1296,9 @@ func TestAdaptivePrebuffer(t *testing.T) {
 	}
 
 	for i := 3; i < 7; i++ {
-		e.PushVoice(4, uint16(i), frames[i])
+		e.PushVoice(0, 4, uint16(i), frames[i])
 	}
-	e.PushVoice(4, 7, nil)
+	e.PushVoice(0, 4, 7, nil)
 	for i := 0; i < 6; i++ {
 		e.fillPlayback(out)
 	}
@@ -1310,11 +1312,11 @@ func TestDeafenedDropsVoice(t *testing.T) {
 	frames := encodeFrames(t, 6, false)
 	e.SetDeafened(true)
 	for i, f := range frames {
-		e.PushVoice(9, uint16(i), f)
+		e.PushVoice(0, 9, uint16(i), f)
 	}
 	out := make([]int16, FrameSize)
 	e.fillPlayback(out)
-	if rms(out) != 0 || len(e.TalkingClients()) != 0 {
+	if rms(out) != 0 || len(e.TalkingClients(0)) != 0 {
 		t.Error("com alto-falantes mutados nada deve tocar")
 	}
 }
@@ -1324,10 +1326,10 @@ func TestOutputVolume(t *testing.T) {
 	e.SetNormalizeVoices(false)
 	frames := encodeFrames(t, 8, false)
 	level := func(vol float64) float64 {
-		e.ResetStreams()
+		e.ResetStreams(0)
 		e.SetVolume(vol)
 		for i, f := range frames {
-			e.PushVoice(5, uint16(i), f)
+			e.PushVoice(0, 5, uint16(i), f)
 		}
 		out := make([]int16, FrameSize)
 		var max float64
@@ -1363,7 +1365,7 @@ func TestNormalizeVoices(t *testing.T) {
 		var sum float64
 		n := 0
 		for i, f := range encode(amp, 200) { // 4 s
-			e.PushVoice(2, uint16(i), f)
+			e.PushVoice(0, 2, uint16(i), f)
 			e.fillPlayback(out)
 			if i >= 150 {
 				sum += rms(out)
@@ -1399,7 +1401,7 @@ func TestMixLimiter(t *testing.T) {
 	}()
 	for i, f := range enc {
 		for id := uint16(1); id <= 3; id++ {
-			e.PushVoice(id, uint16(i), f)
+			e.PushVoice(0, id, uint16(i), f)
 		}
 	}
 	out := make([]int16, FrameSize)
@@ -1625,10 +1627,10 @@ func TestVoiceStreamsAreBounded(t *testing.T) {
 	e, _ := newTestEngine(t)
 	frames := encodeTone(t, 1, 440, 8000)
 	for from := 1; from <= 5000; from++ {
-		e.PushVoice(uint16(from), 0, frames[0])
+		e.PushVoice(0, uint16(from), 0, frames[0])
 	}
 	e.rxMu.Lock()
-	n, newest := len(e.streams), e.streams[5000]
+	n, newest := len(e.streams), e.streams[voiceKey{0, 5000}]
 	e.rxMu.Unlock()
 	if n > maxStreams {
 		t.Errorf("%d vozes acompanhadas ao mesmo tempo; o limite é %d", n, maxStreams)

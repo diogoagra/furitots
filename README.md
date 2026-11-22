@@ -76,6 +76,8 @@
 
 - Árvore de canais com ícones, grupos, bandeiras e avatares; bate-papo de
   canal, de servidor e privado, com BBCode e histórico.
+- **Vários servidores ao mesmo tempo**, um em cada aba: você ouve todos e
+  fala em um, escolhido por você.
 - Várias identidades (importa as do TeamSpeak 3), favoritos, reconexão
   automática, sussurro para um cliente ou um canal.
 - Moderação e administração: mover, expulsar, banir, cutucar, dar a palavra;
@@ -98,6 +100,9 @@
   <img src="docs/img/scripts.png" width="410" alt="Janela de scripts">
   <img src="docs/img/sobre.png" width="410" alt="Janela Sobre: versão, autor, licença e créditos">
 </p>
+<p align="center">
+  <img src="docs/img/abas.png" width="820" alt="Dois servidores abertos em abas: a aba à vista, a aba em que se fala e uma mensagem não lida na outra">
+</p>
 <p align="center"><sub>Capturas feitas no modo demonstração (backend simulado).</sub></p>
 
 ## Estado do projeto
@@ -108,9 +113,8 @@
 | **Windows** | O executável é gerado por compilação cruzada e depende só de DLLs do próprio Windows, mas ainda não foi validado em uso: experimental. Detalhes em [docs/windows.md](docs/windows.md). |
 | **Servidores** | TeamSpeak 3 e [TeamSpeak 6 Server](https://github.com/teamspeak/teamspeak6-server). |
 
-O app é de uma conexão por vez e ainda não tem tudo o que o cliente original
-tem; veja as [limitações conhecidas](docs/limitacoes.md) e o
-[roadmap](docs/roadmap.md).
+O app ainda não tem tudo o que o cliente original tem; veja as
+[limitações conhecidas](docs/limitacoes.md) e o [roadmap](docs/roadmap.md).
 
 ## Compilar e rodar
 

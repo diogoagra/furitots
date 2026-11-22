@@ -62,7 +62,7 @@ func main() {
 	var startHotkeys sync.Once
 	// Só a API vai para a janela; os ganchos de desenvolvimento entram apenas
 	// em executáveis compilados para isso (ver devhooks.go).
-	bind := append([]interface{}{app.API()}, devBindings(app)...)
+	bind := append([]interface{}{app.Bridge()}, devBindings(app)...)
 
 	err = wails.Run(&options.App{
 		Title:     "Furito TS",
@@ -149,7 +149,13 @@ func buildMenu(app *backend.App) *menu.Menu {
 
 	conn := root.AddSubmenu("Conexões")
 	conn.AddText("Conectar…", keys.CmdOrCtrl("s"), action("connect"))
+	conn.AddText("Conectar em nova aba…", keys.CmdOrCtrl("t"), action("newTab"))
 	conn.AddText("Desconectar", keys.CmdOrCtrl("d"), action("disconnect"))
+	conn.AddSeparator()
+	// Abas: um servidor em cada uma. (Cmd+W fica com a janela, como no resto do macOS.)
+	conn.AddText("Próxima aba", keys.Combo("]", keys.CmdOrCtrlKey, keys.ShiftKey), action("nextTab"))
+	conn.AddText("Aba anterior", keys.Combo("[", keys.CmdOrCtrlKey, keys.ShiftKey), action("prevTab"))
+	conn.AddText("Fechar aba", keys.Combo("w", keys.CmdOrCtrlKey, keys.ShiftKey), action("closeTab"))
 	conn.AddSeparator()
 	conn.AddText("Favoritos…", keys.CmdOrCtrl("b"), action("bookmarks"))
 	conn.AddText("Scripts…", keys.Combo("j", keys.CmdOrCtrlKey, keys.ShiftKey), action("scripts"))

@@ -114,7 +114,7 @@ func TestLiveAdmin(t *testing.T) {
 	viewer, viewEm, v := newApp("FuritoVisita")
 	viewerID := state(viewEm).Self.ClientID
 	var voiceIn atomic.Int64
-	viewer.client.OnVoice = func(from, seq uint16, codec byte, opus []byte) {
+	viewer.current().client.OnVoice = func(from, seq uint16, codec byte, opus []byte) {
 		if len(opus) > 0 {
 			voiceIn.Add(1)
 		}
@@ -214,7 +214,7 @@ func TestLiveAdmin(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "relatorio final.txt")
 	content := bytes.Repeat([]byte("conteúdo do arquivo de teste\n"), 500)
 	os.WriteFile(local, content, 0o600)
-	n, err := admin.uploadFiles(sala.ID, "/", "", []string{local})
+	n, err := admin.current().uploadFiles(sala.ID, "/", "", []string{local})
 	must("enviar arquivo", err)
 	must("criar pasta", a.CreateChannelDirectory(sala.ID, "/docs", ""))
 	files, err := a.ListChannelFiles(sala.ID, "/", "")
@@ -227,7 +227,7 @@ func TestLiveAdmin(t *testing.T) {
 	if n != 1 || !gotFile || !gotDir {
 		t.Errorf("arquivos do canal: enviados=%d lista=%+v", n, files)
 	}
-	data, err := admin.client.DownloadFile(sala.ID, "/relatorio final.txt", "")
+	data, err := admin.current().client.DownloadFile(sala.ID, "/relatorio final.txt", "")
 	if err != nil || !bytes.Equal(data, content) {
 		t.Errorf("download do arquivo: %d bytes, err=%v", len(data), err)
 	}

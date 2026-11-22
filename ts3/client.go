@@ -392,6 +392,20 @@ func (c *Client) SetMuteState(inputMuted, outputMuted bool) {
 	))
 }
 
+// SetInputHardware publica se o microfone está em uso nesta conexão. Com
+// várias conexões abertas fala-se em uma por vez: nas outras o microfone
+// aparece como desativado (não como mutado), igual ao cliente oficial.
+func (c *Client) SetInputHardware(on bool) {
+	c.send(BuildCommand("clientupdate", Param{"client_input_hardware", boolParam(on)}))
+}
+
+// ServerName devolve o nome do servidor ("" se ainda não o sabemos).
+func (c *Client) ServerName() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.Name
+}
+
 // SetRecording publica se estamos gravando a conversa: os outros clientes
 // mostram o indicador de gravação ao lado do nosso nome, como faz o cliente
 // oficial.

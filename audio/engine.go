@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -75,8 +76,15 @@ const (
 	pttRelease = 5 // quadros (100 ms) transmitidos depois de soltar a tecla
 )
 
+// voiceKey identifica uma voz recebida. O número do cliente só vale dentro de
+// uma conexão: em dois servidores, pessoas diferentes têm o mesmo número.
+type voiceKey struct {
+	conn uint32
+	id   uint16
+}
+
 type stream struct {
-	dec *opus.Decoder // usado só pela goroutine de rede
+	dec *opus.Decoder // usado só pela goroutine de rede da conexão dele
 	lev *leveler      // idem
 
 	// protegidos por Engine.rxMu:
@@ -86,8 +94,9 @@ type stream struct {
 	talking   bool
 	prebuffer int
 	stable    int
+	seen      time.Time // quando chegou o último pacote aproveitado (para a limpeza dos fluxos parados)
 
-	// usados só pela goroutine de rede:
+	// usados só pela goroutine de rede da conexão dele:
 	lastSeq    uint16
 	hasSeq     bool
 	lastPacket time.Time
@@ -159,12 +168,20 @@ type Engine struct {
 	calMu sync.Mutex
 	cal   *calibration // a medida em andamento, ou nil
 
+	// para qual conexão vai o que transmitimos (SetTxConn)
+	txMu   sync.Mutex
+	txConn uint32
+	txSend bool // false: nada é entregue a sendVoice
+	txSent bool // o trecho de fala em andamento já teve um quadro entregue
+
 	// recepção
 	rxMu        sync.Mutex
-	streams     map[uint16]*stream
-	clientGain  map[uint16]float64 // volume por pessoa (1 = normal)
-	clientMuted map[uint16]bool    // mutado só para nós
+	streams     map[voiceKey]*stream
+	clientGain  map[voiceKey]float64 // volume por pessoa (1 = normal)
+	clientMuted map[voiceKey]bool    // mutado só para nós
+	connMuted   map[uint32]bool      // conexões silenciadas por inteiro (SetConnMuted)
 	mixBuf      []float64
+	recBuf      []float64 // as vozes da conexão em gravação (só fillPlayback usa)
 	rxLimiter   *limiter
 
 	// gravação da conversa (recorder.go)
@@ -233,9 +250,11 @@ func newEngine(sendVoice func(opusData []byte)) (*Engine, error) {
 		opusBuf:         make([]byte, 1500),
 		micCh:           make(chan []int16, 16),
 		stop:            make(chan struct{}),
-		streams:         make(map[uint16]*stream),
-		clientGain:      make(map[uint16]float64),
-		clientMuted:     make(map[uint16]bool),
+		txSend:          true,
+		streams:         make(map[voiceKey]*stream),
+		clientGain:      make(map[voiceKey]float64),
+		clientMuted:     make(map[voiceKey]bool),
+		connMuted:       make(map[uint32]bool),
 		rxLimiter:       newLimiter(30000, 120),
 	}
 	return e, nil
@@ -468,7 +487,10 @@ func (e *Engine) SetDeafened(d bool) {
 	}
 	e.lbMu.Unlock()
 	if d {
-		e.ResetStreams()
+		e.rxMu.Lock()
+		e.streams = make(map[voiceKey]*stream)
+		e.rxMu.Unlock()
+		e.clearLoopback()
 	}
 }
 
@@ -489,31 +511,107 @@ func (e *Engine) SetBitrate(bps int) {
 func (e *Engine) SetPTT(down bool) { e.ptt.Store(down) }
 
 // SetClientGain ajusta o volume de uma pessoa só para nós (1 = normal, 2 = dobro).
-func (e *Engine) SetClientGain(id uint16, gain float64) {
+// conn é a conexão em que ela está.
+func (e *Engine) SetClientGain(conn uint32, id uint16, gain float64) {
 	if gain < 0 {
 		gain = 0
 	}
 	if gain > 2 {
 		gain = 2
 	}
+	key := voiceKey{conn, id}
 	e.rxMu.Lock()
 	if gain == 1 {
-		delete(e.clientGain, id)
+		delete(e.clientGain, key)
 	} else {
-		e.clientGain[id] = gain
+		e.clientGain[key] = gain
 	}
 	e.rxMu.Unlock()
 }
 
 // SetClientMuted silencia (ou volta a ouvir) uma pessoa só para nós.
-func (e *Engine) SetClientMuted(id uint16, muted bool) {
+func (e *Engine) SetClientMuted(conn uint32, id uint16, muted bool) {
+	key := voiceKey{conn, id}
 	e.rxMu.Lock()
 	if muted {
-		e.clientMuted[id] = true
+		e.clientMuted[key] = true
 	} else {
-		delete(e.clientMuted, id)
+		delete(e.clientMuted, key)
 	}
 	e.rxMu.Unlock()
+}
+
+// SetConnMuted silencia uma conexão inteira ("silenciar esta aba"): as vozes
+// dela deixam de tocar e os pacotes que chegam são descartados, como acontece
+// em todas com os alto-falantes mutados. Os ajustes por pessoa ficam.
+func (e *Engine) SetConnMuted(conn uint32, muted bool) {
+	e.rxMu.Lock()
+	if muted {
+		e.connMuted[conn] = true
+		e.dropStreamsLocked(conn)
+	} else {
+		delete(e.connMuted, conn)
+	}
+	e.rxMu.Unlock()
+}
+
+// ConnMuted diz se a conexão está silenciada (SetConnMuted).
+func (e *Engine) ConnMuted(conn uint32) bool {
+	e.rxMu.Lock()
+	defer e.rxMu.Unlock()
+	return e.connMuted[conn]
+}
+
+// SetTxConn diz para qual conexão vai o que transmitimos. Com on = false nada
+// é entregue a sendVoice (nem o soundboard) e Transmitting fica falso; o
+// medidor do microfone, o teste de microfone e a calibração seguem
+// funcionando. Não é o microfone mutado: Muted não muda.
+//
+// Se um trecho de fala estava sendo entregue, o fim dele (sendVoice com slice
+// vazio) é entregue aqui dentro, antes da troca: quem roteia o callback pela
+// conexão deve mudar o destino só depois de SetTxConn voltar. O callback não
+// pode chamar SetTxConn, e quem chama SetTxConn não pode estar segurando uma
+// trava que o callback também toma.
+func (e *Engine) SetTxConn(conn uint32, on bool) {
+	e.txMu.Lock()
+	defer e.txMu.Unlock()
+	if e.txConn == conn && e.txSend == on {
+		return
+	}
+	if e.txSent {
+		e.txSent = false
+		e.txTalking.Store(false)
+		e.sendVoice(nil) // o destino antigo fica sabendo que paramos de falar
+	}
+	e.txConn, e.txSend = conn, on
+}
+
+// txTarget devolve o destino atual da transmissão.
+func (e *Engine) txTarget() (conn uint32, on bool) {
+	e.txMu.Lock()
+	defer e.txMu.Unlock()
+	return e.txConn, e.txSend
+}
+
+// deliver entrega um quadro codificado ao destino da transmissão; opusData
+// vazio encerra o trecho de fala. Só a goroutine txLoop chama.
+func (e *Engine) deliver(opusData []byte) {
+	e.txMu.Lock()
+	defer e.txMu.Unlock()
+	if len(opusData) == 0 {
+		e.txTalking.Store(false)
+		if e.txSent {
+			e.txSent = false
+			e.sendVoice(nil) // avisa os outros que paramos de falar
+		}
+		return
+	}
+	if !e.txSend {
+		return
+	}
+	e.txSent = true
+	e.txTalking.Store(true)
+	e.sendVoice(opusData)
 }
 
 // MicLevel é o RMS do último quadro do microfone, já sem ruído (mesma escala
@@ -528,9 +626,10 @@ func (e *Engine) Transmitting() bool { return e.txTalking.Load() }
 
 // ---------------------------------------------------------------- recepção
 
-// PushVoice recebe um pacote de voz de um cliente. Deve ser chamado sempre
-// pela mesma goroutine (a de rede). opusData vazio = fim da fala.
-func (e *Engine) PushVoice(from uint16, seq uint16, opusData []byte) {
+// PushVoice recebe um pacote de voz do cliente from da conexão conn. Cada
+// conexão deve chamar sempre da mesma goroutine (a de rede dela); conexões
+// diferentes podem chamar ao mesmo tempo. opusData vazio = fim da fala.
+func (e *Engine) PushVoice(conn uint32, from uint16, seq uint16, opusData []byte) {
 	e.mu.Lock()
 	deafened, normalize := e.deafened, e.normalizeVoices
 	e.mu.Unlock()
@@ -538,9 +637,14 @@ func (e *Engine) PushVoice(from uint16, seq uint16, opusData []byte) {
 		return
 	}
 	now := time.Now()
+	key := voiceKey{conn, from}
 
 	e.rxMu.Lock()
-	st := e.streams[from]
+	if e.connMuted[conn] {
+		e.rxMu.Unlock()
+		return
+	}
+	st := e.streams[key]
 	if st == nil {
 		dec, err := opus.NewDecoder(SampleRate, 1)
 		if err != nil {
@@ -549,16 +653,20 @@ func (e *Engine) PushVoice(from uint16, seq uint16, opusData []byte) {
 		}
 		// alvo um pouco abaixo do microfone local; no máximo +12 dB / -8 dB
 		st = &stream{dec: dec, lev: newLeveler(3000, 0.4, 4), prebuffer: minPrebuffer}
-		e.streams[from] = st
-		oldest, found := uint16(0), false
-		for id, other := range e.streams { // aproveita para limpar quem sumiu
-			if id == from {
+		e.streams[key] = st
+		// Aproveita para limpar quem sumiu, de qualquer conexão. Só se olha o
+		// que a trava protege (seen): os outros fluxos podem estar sendo
+		// alimentados agora mesmo pela goroutine de outra conexão.
+		var oldest voiceKey
+		found := false
+		for k, other := range e.streams {
+			if k == key {
 				continue
 			}
-			if now.Sub(other.lastPacket) > streamIdle {
-				delete(e.streams, id)
-			} else if !found || other.lastPacket.Before(e.streams[oldest].lastPacket) {
-				oldest, found = id, true
+			if now.Sub(other.seen) > streamIdle {
+				delete(e.streams, k)
+			} else if !found || other.seen.Before(e.streams[oldest].seen) {
+				oldest, found = k, true
 			}
 		}
 		if found && len(e.streams) > maxStreams {
@@ -615,6 +723,7 @@ func (e *Engine) PushVoice(from uint16, seq uint16, opusData []byte) {
 
 	e.rxMu.Lock()
 	st.ending = false
+	st.seen = now
 	st.pcm = append(st.pcm, decoded...)
 	if len(st.pcm) > maxQueueSamples {
 		// Atrasou demais (travada local ou rajada): descarta o mais antigo
@@ -630,26 +739,70 @@ func (e *Engine) PushVoice(from uint16, seq uint16, opusData []byte) {
 	e.rxMu.Unlock()
 }
 
-// ResetStreams descarta todo o áudio recebido pendente.
-func (e *Engine) ResetStreams() {
+// ResetStreams esquece o que veio da conexão conn: o áudio recebido pendente
+// e os ajustes por pessoa (volume e mudo), já que os números de cliente dela
+// deixam de valer. As outras conexões não são tocadas.
+func (e *Engine) ResetStreams(conn uint32) {
 	e.rxMu.Lock()
-	e.streams = make(map[uint16]*stream)
+	e.dropStreamsLocked(conn)
+	for k := range e.clientGain {
+		if k.conn == conn {
+			delete(e.clientGain, k)
+		}
+	}
+	for k := range e.clientMuted {
+		if k.conn == conn {
+			delete(e.clientMuted, k)
+		}
+	}
 	e.rxMu.Unlock()
+	e.clearLoopback()
+}
+
+// dropStreamsLocked descarta o áudio recebido pendente de uma conexão.
+// Chamar com rxMu travado.
+func (e *Engine) dropStreamsLocked(conn uint32) {
+	for k := range e.streams {
+		if k.conn == conn {
+			delete(e.streams, k)
+		}
+	}
+}
+
+// clearLoopback descarta o retorno local pendente (teste de microfone e
+// soundboard).
+func (e *Engine) clearLoopback() {
 	e.lbMu.Lock()
 	e.loopback = e.loopback[:0]
 	e.lbMu.Unlock()
 }
 
-// TalkingClients devolve os clientes cujo áudio está tocando agora.
-func (e *Engine) TalkingClients() []uint16 {
+// TalkingClients devolve os clientes da conexão conn cujo áudio está tocando
+// agora.
+func (e *Engine) TalkingClients(conn uint32) []uint16 {
 	e.rxMu.Lock()
 	defer e.rxMu.Unlock()
 	var out []uint16
-	for id, st := range e.streams {
-		if st.talking {
-			out = append(out, id)
+	for k, st := range e.streams {
+		if k.conn == conn && st.talking {
+			out = append(out, k.id)
 		}
 	}
+	return out
+}
+
+// TalkingConns devolve, em ordem crescente, as conexões em que o áudio de
+// alguém está tocando agora.
+func (e *Engine) TalkingConns() []uint32 {
+	e.rxMu.Lock()
+	defer e.rxMu.Unlock()
+	var out []uint32
+	for k, st := range e.streams {
+		if st.talking && !slices.Contains(out, k.conn) {
+			out = append(out, k.conn)
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 
@@ -669,8 +822,21 @@ func (e *Engine) fillPlayback(out []int16) {
 	volume, deafened := e.volume, e.deafened
 	e.mu.Unlock()
 
+	// Gravação em andamento: as vozes da conexão gravada são somadas à parte.
+	var recMix []float64
+	recConn, recording := e.recordingConn()
+	if recording {
+		if cap(e.recBuf) < n {
+			e.recBuf = make([]float64, n)
+		}
+		recMix = e.recBuf[:n]
+		for i := range recMix {
+			recMix[i] = 0
+		}
+	}
+
 	e.rxMu.Lock()
-	for id, st := range e.streams {
+	for key, st := range e.streams {
 		if !st.playing {
 			if len(st.pcm) >= st.prebuffer || (st.ending && len(st.pcm) > 0) {
 				st.playing = true
@@ -683,13 +849,18 @@ func (e *Engine) fillPlayback(out []int16) {
 		if len(st.pcm) < k {
 			k = len(st.pcm)
 		}
-		if !deafened && !e.clientMuted[id] {
+		if !deafened && !e.clientMuted[key] {
 			gain := 1.0
-			if g, ok := e.clientGain[id]; ok {
+			if g, ok := e.clientGain[key]; ok {
 				gain = g
 			}
 			for i := 0; i < k; i++ {
 				mix[i] += float64(st.pcm[i]) * gain
+			}
+			if recording && key.conn == recConn {
+				for i := 0; i < k; i++ {
+					recMix[i] += float64(st.pcm[i]) * gain
+				}
 			}
 		}
 		copy(st.pcm, st.pcm[k:])
@@ -708,7 +879,9 @@ func (e *Engine) fillPlayback(out []int16) {
 	}
 	e.rxMu.Unlock()
 
-	e.recordPlayback(mix) // só as vozes: avisos e teste de microfone não entram
+	if recording {
+		e.recordPlayback(recMix, recConn) // só as vozes: avisos e teste de microfone não entram
+	}
 
 	e.lbMu.Lock()
 	k := n
@@ -1000,8 +1173,7 @@ func (e *Engine) txFrame(mic []int16) {
 	if frame == nil && sb == nil {
 		if e.txOn {
 			e.txOn = false
-			e.txTalking.Store(false)
-			e.sendVoice(nil) // avisa os outros que paramos de falar
+			e.deliver(nil) // avisa os outros que paramos de falar
 		}
 		return
 	}
@@ -1474,7 +1646,10 @@ func (e *Engine) emit(voice []float64, sb []int16, effect VoiceEffect, sbLocal, 
 		}
 	}
 	e.txLimiter.run(out)
-	e.recordTx(out)
+	conn, send := e.txTarget()
+	if send {
+		e.recordTx(out, conn)
+	}
 
 	pcm := make([]int16, FrameSize)
 	toInt16(pcm, out)
@@ -1483,6 +1658,13 @@ func (e *Engine) emit(voice []float64, sb []int16, effect VoiceEffect, sbLocal, 
 		e.pushLoopback(pcm) // teste de microfone: ouve exatamente o que é enviado
 	case sb != nil && sbLocal:
 		e.pushLoopback(sb)
+	}
+
+	if !send {
+		// Sem destino: o trecho segue (o efeito não recomeça a cada quadro e o
+		// teste de microfone toca), só não é codificado nem entregue.
+		e.txOn = true
+		return
 	}
 
 	e.mu.Lock()
@@ -1496,6 +1678,5 @@ func (e *Engine) emit(voice []float64, sb []int16, effect VoiceEffect, sbLocal, 
 		return
 	}
 	e.txOn = true
-	e.txTalking.Store(true)
-	e.sendVoice(e.opusBuf[:n])
+	e.deliver(e.opusBuf[:n])
 }
