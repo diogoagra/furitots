@@ -3089,10 +3089,30 @@
   }
   function closeAbout() { closeModal($('dlgAbout')); }
 
-  function openSettings() {
+  // Os Ajustes têm uma aba por assunto. A janela abre na última aba usada, a
+  // não ser que quem a abre peça uma (pane).
+  const SETTINGS_PANES = ['audio', 'hotkeys', 'connection', 'privacy', 'screen', 'identities'];
+  let settingsPane = SETTINGS_PANES.includes(loadPrefs().settingsPane) ? loadPrefs().settingsPane : 'audio';
+  function showSettingsPane(name, focus) {
+    if (!SETTINGS_PANES.includes(name)) name = 'audio';
+    if (name !== settingsPane) { settingsPane = name; savePrefs({ settingsPane: name }); setSettingsNote('', ''); }
+    $('setTabs').querySelectorAll('.set-tab').forEach((tab) => {
+      const on = tab.dataset.pane === name;
+      tab.classList.toggle('active', on);
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      tab.tabIndex = on ? 0 : -1; // só a aba ativa entra na ordem do Tab; as setas andam entre elas
+      if (on && focus) tab.focus();
+    });
+    $('dlgSettings').querySelectorAll('.set-pane').forEach((pane) => { pane.hidden = pane.dataset.pane !== name; });
+    const body = $('dlgSettings').querySelector('.dlg-content');
+    if (body) body.scrollTop = 0;
+  }
+
+  function openSettings(pane) {
     settingsOpen = true;
     setSettingsNote('', '');
     openModal($('dlgSettings'));
+    showSettingsPane(typeof pane === 'string' ? pane : settingsPane);
     renderSettings(true);
   }
   function closeSettings() {
@@ -3160,6 +3180,20 @@
     $('cIdentity').addEventListener('change', onConnectIdentityChange);
     $('setClose').addEventListener('click', closeSettings);
     $('dlgSettings')._dismiss = closeSettings;
+    $('setTabs').addEventListener('click', (e) => {
+      const tab = e.target.closest('.set-tab');
+      if (tab) showSettingsPane(tab.dataset.pane);
+    });
+    $('setTabs').addEventListener('keydown', (e) => {
+      const i = SETTINGS_PANES.indexOf(settingsPane), n = SETTINGS_PANES.length;
+      const to = e.key === 'ArrowRight' ? (i + 1) % n : e.key === 'ArrowLeft' ? (i + n - 1) % n : e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : -1;
+      if (to < 0) return;
+      e.preventDefault();
+      showSettingsPane(SETTINGS_PANES[to], true);
+    });
+    // o resto dos ajustes de áudio mora no painel do microfone, que tem o medidor
+    // (abre depois do clique terminar: o mesmo clique, visto pela página, fecharia o painel)
+    $('setOpenCapture').addEventListener('click', () => { closeSettings(); setTimeout(() => showPopover($('popCapture'), $('tbCapture')), 0); });
     $('setIn').addEventListener('change', (e) => call('SetInputDevice', e.target.value).catch((err) => setSettingsNote(errText(err), '')));
     $('setOut').addEventListener('change', (e) => call('SetOutputDevice', e.target.value).catch((err) => setSettingsNote(errText(err), '')));
     document.querySelectorAll('input[name="vadModeS"]').forEach((r) => {
@@ -3650,9 +3684,9 @@
       case 'muted': run('ToggleMute'); run('ToggleDeafen'); run('SetAway', [true, 'já volto']); break;
       case 'collapse': collapsed.add(3); renderTree(); select('channel', 8, true); break;
       // recursos novos
-      case 'settings': openSettings(); break;
+      case 'settings': openSettings(new URLSearchParams(location.search).get('pane') || 'audio'); break; // &pane=hotkeys|connection|privacy|screen|identities
       case 'about': openAbout(); break;
-      case 'hotkey': openSettings(); captureHotkey('ptt', 'Apertar para falar'); break;
+      case 'hotkey': openSettings('hotkeys'); captureHotkey('ptt', 'Apertar para falar'); break;
       case 'bookmarks': showMenu(bookmarksMenu(), $('tbBookmarks')); break;
       case 'bookmarksdlg': openBookmarks(); break;
       case 'clientmenu': case 'groupsmenu': case 'selfmenu': {
@@ -4104,6 +4138,24 @@
       // ajustes: modo de transmissão, atalho e apertar para falar
       $('tbSettings').click();
       chk('settings', !$('dlgSettings').hidden && $('hkRows').querySelectorAll('.hk-row').length === 4 && $('setIn').options.length >= 2 && $('setUid').textContent.length > 5);
+      // uma aba por assunto: só a escolhida aparece, as setas andam entre elas e a janela reabre na última usada
+      {
+        const stabs = Array.from($('setTabs').querySelectorAll('.set-tab'));
+        const shown = () => Array.from($('dlgSettings').querySelectorAll('.set-pane')).filter((p) => !p.hidden).map((p) => p.dataset.pane).join(',');
+        const vis = (id) => $(id).getClientRects().length > 0;
+        chk('settingsTabs', stabs.length === 6 && shown() === 'audio' && stabs[0].classList.contains('active') && stabs[0].getAttribute('aria-selected') === 'true' && vis('setIn') && !vis('hkRows') && !vis('setIdList'), shown());
+        stabs[5].click();
+        chk('settingsTabClick', shown() === 'identities' && vis('setIdList') && !vis('setIn') && stabs[5].tabIndex === 0 && stabs[0].tabIndex === -1, shown());
+        $('setTabs').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+        const wrapped = shown();
+        $('setTabs').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+        chk('settingsTabKeys', wrapped === 'audio' && shown() === 'hotkeys' && document.activeElement === stabs[1], wrapped + ' ' + shown());
+        key('keydown', 'Escape'); $('tbSettings').click();
+        chk('settingsTabRemembered', !$('dlgSettings').hidden && shown() === 'hotkeys' && vis('hkRows'), shown());
+        stabs[0].click(); $('setOpenCapture').click(); await wait(30);
+        chk('settingsToMicPanel', $('dlgSettings').hidden && !$('popCapture').hidden);
+        closePopover(); $('tbSettings').click();
+      }
       const pttRadio = document.querySelector('input[name="vadModeS"][value="ptt"]');
       pttRadio.checked = true; pttRadio.dispatchEvent(new Event('change', { bubbles: true })); await wait(20);
       $('hkRows').querySelector('[data-hk="ptt"]').click();

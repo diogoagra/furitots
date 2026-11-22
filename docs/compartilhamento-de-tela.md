@@ -24,7 +24,7 @@ Como funciona:
   descobrir o endereço IP um do outro (o TeamSpeak normalmente esconde o IP
   dos outros usuários). O app avisa antes do primeiro uso. Para esconder o IP,
   configure um servidor de retransmissão TURN (por exemplo um `coturn` da
-  comunidade) em Ajustes → Compartilhamento de tela e marque "Esconder meu
+  comunidade) em Ajustes → Tela e marque "Esconder meu
   IP": todo o vídeo passa por ele. A senha do TURN fica no arquivo de ajustes.
 - **Captura:** no macOS é feita pelo app (ScreenCaptureKit, macOS 12.3+); na
   primeira vez o sistema pede a permissão de Gravação de Tela e o app precisa

@@ -22,7 +22,8 @@ e onde ficam os dados.
   nome e o apelido. A janela de conexão e cada favorito podem usar uma
   identidade diferente da padrão. Servidores TeamSpeak 6 mostram um UID mais
   longo (SHA-256 da mesma chave) que o do TS3 (SHA-1); os Ajustes mostram os
-  dois. Também: aumentar o nível de segurança e usar chave de privilégio.
+  dois. Também: aumentar o nível de segurança; a chave de privilégio fica em
+  Ajustes → Conexão.
 - **Sobre** (botão "i" da barra, ao lado dos Ajustes, ou Ajuda → Sobre): a
   versão do app, o autor, a licença e os créditos.
 - **Versão**: entre clientes Furito a versão aparece como "Furito TS 1.0.1".
@@ -45,6 +46,12 @@ Cada ação espera a confirmação do servidor e mostra o erro dele (por exemplo
 As janelas internas (Ajustes, Favoritos, cutucada, permissões…) são painéis
 dentro da janela do app: arrastam pelo título, sempre cabem na janela (o miolo
 rola; título e botões ficam à vista) e voltam ao centro a cada abertura.
+
+Os **Ajustes** têm uma aba por assunto — Áudio, Atalhos, Conexão,
+Privacidade, Tela e Identidades — e reabrem na última aba usada. O que mexe
+no som enquanto você fala (supressão de ruído, sensibilidade, cancelamento de
+eco, avisos sonoros) fica no painel do microfone, junto do medidor; a aba
+Áudio tem um botão que leva até ele.
 
 ## Vários servidores ao mesmo tempo
 
@@ -95,7 +102,7 @@ Cada servidor fica numa aba. A barra de abas aparece quando há duas ou mais.
   `[size]`, `[hr]` e listas. Buscar uma imagem mostra o seu endereço IP ao
   site que a hospeda, então ela não carrega sozinha: aparece um marcador
   ("Imagem de *site* — clique para carregar"), e "Carregar sempre as imagens
-  deste servidor" libera o servidor de uma vez. Em Ajustes → Conexão →
+  deste servidor" libera o servidor de uma vez. Em Ajustes → Privacidade →
   *Imagens de fora* dá para carregar sempre (como o cliente original) ou
   nunca. Em mensagens e cutucadas, `[img]` vira só o endereço. Os motivos
   estão em [seguranca.md](seguranca.md).

@@ -34,8 +34,8 @@ Para relatar uma falha, veja o [SECURITY.md](../SECURITY.md).
   - em descrições, na mensagem de boas-vindas e no banner do servidor, a imagem
     aparece como um marcador ("Imagem de *site* — clique para carregar"). Um
     clique carrega aquela imagem; "Carregar sempre as imagens deste servidor"
-    libera o servidor (pela identidade dele). Em Ajustes → Conexão → *Imagens
-    de fora* dá para escolher "carregar sempre" ou "nunca carregar";
+    libera o servidor (pela identidade dele). Em Ajustes → Privacidade →
+    *Imagens de fora* dá para escolher "carregar sempre" ou "nunca carregar";
   - endereços da rede local (`192.168.x`, `10.x`, `localhost`…) nunca são
     carregados como imagem, em nenhum modo.
 - **As linhas do registro não interpretam BBCode de terceiros.** "Fulano
