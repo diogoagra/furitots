@@ -79,7 +79,7 @@ func (a *App) startRecording(now time.Time) (string, error) {
 		name += " - " + safeFileName(server)
 	}
 	path := filepath.Join(dir, name+".wav")
-	if err := a.engine.StartRecording(path); err != nil {
+	if err := a.engine.StartRecording(path, 0); err != nil {
 		return "", err
 	}
 	a.client.SetRecording(true)

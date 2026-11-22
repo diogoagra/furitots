@@ -234,7 +234,7 @@ func NewApp(opts Options) (*App, error) {
 	a.client.OnPluginCommand = a.onPluginCommand
 	a.client.OnVoice = func(from, seq uint16, _ byte, opusData []byte) {
 		if uint32(from) != a.selfID.Load() {
-			a.engine.PushVoice(from, seq, opusData)
+			a.engine.PushVoice(0, from, seq, opusData)
 		}
 	}
 
@@ -385,7 +385,7 @@ func (a *App) emitLoop() {
 					a.markDirty()
 				}
 			}
-			talking := a.engine.TalkingClients()
+			talking := a.engine.TalkingClients(0)
 			self := a.engine.Transmitting()
 			level, prob := a.engine.MicLevel(), a.engine.VoiceProbability()
 			if !a.engine.CaptureAvailable() {
@@ -470,7 +470,7 @@ func (a *App) onDisconnected(reason string, isError bool) {
 	if !a.engine.MicTest() {
 		a.engine.StopCapture()
 	}
-	a.engine.ResetStreams()
+	a.engine.ResetStreams(0)
 
 	a.whisper.Store(&WhisperDTO{})
 	a.mu.Lock()
@@ -824,8 +824,8 @@ func (a *App) buildState() State {
 			dto.Volume = v
 		}
 		// Aplica no áudio o volume/mudo escolhidos para esta pessoa.
-		a.engine.SetClientGain(cl.ID, dto.Volume/100)
-		a.engine.SetClientMuted(cl.ID, dto.MutedLocally || dto.Contact == "blocked")
+		a.engine.SetClientGain(0, cl.ID, dto.Volume/100)
+		a.engine.SetClientMuted(0, cl.ID, dto.MutedLocally || dto.Contact == "blocked")
 		if cl.ID == snap.SelfID {
 			st.Self.TalkRequested = cl.TalkRequest
 		}
