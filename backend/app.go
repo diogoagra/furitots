@@ -62,27 +62,24 @@ const (
 	maxMessages = 1000
 )
 
+// App é o aplicativo: o áudio, os ajustes, as identidades, os scripts e a
+// lista de conexões. O que pertence a um servidor só fica em conn.
 type App struct {
 	opts       Options
-	client     *ts3.Client
 	engine     *audio.Engine
 	emitter    atomic.Pointer[emitterBox]
-	codec      atomic.Uint32 // codec do canal atual (4 = Opus Voice, 5 = Opus Music)
 	picker     atomic.Pointer[FilePicker]
 	openPicker atomic.Pointer[OpenPicker]
 	dirPicker  atomic.Pointer[DirPicker]
 	quit       atomic.Pointer[func()]
 	savePicker atomic.Pointer[SavePicker]
-	whisper    atomic.Pointer[WhisperDTO]
 	hotkeys    *hotkey.Manager
 	historyDir string
 	historyMu  sync.Mutex // um de cada vez nos arquivos de histórico
 
 	identMu      sync.Mutex
-	identity     *ts3.Identity    // a identidade em uso (a de identActive)
 	idents       []*identityEntry // todas as identidades
 	identDefault string           // id da padrão
-	identActive  string           // id da que está em uso
 
 	soundDir  string
 	iconDir   string
@@ -92,38 +89,35 @@ type App struct {
 	scripts   scriptStore
 
 	iconMu   sync.Mutex
-	icons    map[uint32]string // id → data URL ("" = falhou nesta conexão)
+	icons    map[uint32]string // id → data URL; o que falhou fica na conexão (conn.iconFailed)
 	iconWait map[uint32]chan struct{}
-	avatars  map[string]string // uid + marca do avatar → data URL ("" = falhou nesta conexão); protegido por iconMu
-	selfID   atomic.Uint32
+	avatars  map[string]string // uid + marca do avatar → data URL; protegido por iconMu
 	// calibrating: uma medida da voz (API.CalibrateVoice) está em andamento.
 	calibrating atomic.Bool
 	dirty       chan struct{}
-	stop        chan struct{}
-	stopOnce    sync.Once
+	viewDirty   atomic.Bool // o estado da conexão à vista precisa ser publicado de novo
+	// mic é a conexão que recebe o que o microfone capta (nil = nenhuma). Fica
+	// fora de mu: quem a lê é o áudio, a cada quadro transmitido.
+	mic      atomic.Pointer[conn]
+	stop     chan struct{}
+	stopOnce sync.Once
 
 	mu          sync.Mutex
-	status      string
-	lastError   string
-	host        string
+	conns       []*conn // as conexões abertas, na ordem das abas; nunca vazia
+	view        *conn   // a que a interface está mostrando
+	rec         *conn   // a que está sendo gravada (nil = nenhuma)
+	nextConnID  int
 	away        bool
 	awayMessage string
 	settings    Settings
-	messages    []Message
-	nextMsgID   int
+	nextMsgID   int // um contador só: o id de uma mensagem não se repete entre conexões
 	saveTimer   *time.Timer
 	notifyCache map[string][]int16
 
-	hotkeyErrs       map[string]string
-	lastRequest      ConnectRequest // inclui senhas; só em memória
-	reconnectAttempt int
-	reconnectTimer   *time.Timer
-	userDisconnect   bool
-	lastChannel      int
-	historyKey       string
-	devicesAt        time.Time
-	devicesIn        []audio.DeviceInfo
-	devicesOut       []audio.DeviceInfo
+	hotkeyErrs map[string]string
+	devicesAt  time.Time
+	devicesIn  []audio.DeviceInfo
+	devicesOut []audio.DeviceInfo
 }
 
 type emitterBox struct{ e Emitter }
@@ -149,11 +143,9 @@ func NewApp(opts Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	ident := findIdentity(idents, identDefault).Ident
 
 	a := &App{
 		opts:      opts,
-		status:    statusDisconnected,
 		settings:  loadSettings(opts.SettingsPath),
 		dirty:     make(chan struct{}, 1),
 		stop:      make(chan struct{}),
@@ -167,10 +159,8 @@ func NewApp(opts Options) (*App, error) {
 
 		notifyCache:  make(map[string][]int16),
 		hotkeyErrs:   make(map[string]string),
-		identity:     ident,
 		idents:       idents,
 		identDefault: identDefault,
-		identActive:  identDefault,
 		historyDir:   filepath.Join(filepath.Dir(opts.SettingsPath), "history"),
 	}
 	if err := installBundledPacks(opts.SoundPacksZip, a.packDir); err != nil {
@@ -198,13 +188,6 @@ func NewApp(opts Options) (*App, error) {
 			a.settings.NotifyPack = a.packs[0].ID
 		}
 	}
-	a.codec.Store(4)
-
-	a.client = ts3.NewClient(ident)
-	if opts.Debug {
-		a.client.Logf = func(format string, args ...any) { fmt.Printf("[ts3] "+format+"\n", args...) }
-	}
-
 	a.engine, err = audio.NewEngine(a.sendVoice)
 	if err != nil {
 		return nil, err
@@ -222,21 +205,8 @@ func NewApp(opts Options) (*App, error) {
 	a.engine.SetInputDevice(a.settings.InputDevice)
 	a.engine.SetOutputDevice(a.settings.OutputDevice)
 
-	a.client.OnStateChanged = a.markDirty
-	a.client.OnConnected = a.onConnected
-	a.client.OnDisconnected = a.onDisconnected
-	a.client.OnTextMessage = a.onTextMessage
-	a.client.OnLog = func(level, text string) { a.addLog(level, text) }
-	a.client.OnWelcome = func(text string) { a.addMessage(Message{Kind: "log", Level: "success", Text: text, Rich: true}) }
-	a.client.OnNotify = a.notify
-	a.client.OnClientEvent = a.onClientEvent
-	a.client.OnPoke = a.onPoke
-	a.client.OnPluginCommand = a.onPluginCommand
-	a.client.OnVoice = func(from, seq uint16, _ byte, opusData []byte) {
-		if uint32(from) != a.selfID.Load() {
-			a.engine.PushVoice(0, from, seq, opusData)
-		}
-	}
+	a.view = a.newConn() // sempre há uma conexão (uma aba), mesmo desconectada
+	a.setMic(a.view)
 
 	go a.emitLoop()
 	return a, nil
@@ -275,15 +245,15 @@ func (a *App) SetFilePicker(p FilePicker) { a.picker.Store(&p) }
 
 // onPoke: alguém nos cutucou. O som e a linha no registro já saíram (vêm do
 // cliente de protocolo); aqui só se decide se a interface abre uma janela.
-func (a *App) onPoke(from, message string) {
-	a.mu.Lock()
-	popup := a.settings.PokePopup
-	a.mu.Unlock()
+func (c *conn) onPoke(from, message string) {
+	c.app.mu.Lock()
+	popup := c.app.settings.PokePopup
+	c.app.mu.Unlock()
 	if popup {
-		a.emit("poke", PokeDTO{FromName: from, Message: message})
+		c.app.emit("poke", PokeDTO{FromName: from, Message: message})
 	}
-	if a.scripts.anyEnabled() {
-		a.emit("script:event", ScriptEvent{Type: "poke", Text: message, Client: a.scriptSender(0, from, "")})
+	if c.app.scripts.anyEnabled() {
+		c.app.emit("script:event", ScriptEvent{Type: "poke", Text: message, Client: c.scriptSender(0, from, "")})
 	}
 }
 
@@ -310,9 +280,11 @@ func (a *App) NoticeCoupling() string {
 func (a *App) Shutdown() {
 	a.stopRecording()
 	screencap.Stop()
-	a.cancelReconnect(true)
 	a.hotkeys.Close()
-	a.client.Disconnect()
+	for _, c := range a.connList() {
+		c.cancelReconnect(true)
+		c.client.Disconnect()
+	}
 	a.stopOnce.Do(func() { close(a.stop) })
 	a.engine.Close()
 	a.mu.Lock()
@@ -325,10 +297,39 @@ func (a *App) Shutdown() {
 
 // ---------------------------------------------------------------- eventos
 
+// markDirty avisa que algo do app mudou (ajustes, áudio, identidades): o
+// estado da conexão à vista é publicado de novo.
 func (a *App) markDirty() {
+	a.viewDirty.Store(true)
+	a.wake()
+}
+
+// wake acorda o laço que publica o estado.
+func (a *App) wake() {
 	select {
 	case a.dirty <- struct{}{}:
 	default:
+	}
+}
+
+// publish publica o que mudou desde a última vez: o estado inteiro só da
+// conexão que está à vista; das outras, só se aplica o que precisa valer mesmo
+// sem ninguém olhando (ver conn.sync).
+func (a *App) publish() {
+	view := a.current()
+	emit := a.viewDirty.Swap(false)
+	for _, c := range a.connList() {
+		if !c.dirty.Swap(false) {
+			continue
+		}
+		if c == view {
+			emit = true
+		} else {
+			c.sync(c.client.Snapshot())
+		}
+	}
+	if emit {
+		a.emit("state", view.buildState())
 	}
 }
 
@@ -373,7 +374,7 @@ func (a *App) emitLoop() {
 			case <-a.dirty:
 			default:
 			}
-			a.emit("state", a.buildState())
+			a.publish()
 		case <-ticker.C:
 			if sb := a.engine.Soundboard().IsPlaying(); sb != lastSB {
 				lastSB = sb
@@ -385,7 +386,7 @@ func (a *App) emitLoop() {
 					a.markDirty()
 				}
 			}
-			talking := a.engine.TalkingClients(0)
+			talking := a.engine.TalkingClients(a.current().audioID())
 			self := a.engine.Transmitting()
 			level, prob := a.engine.MicLevel(), a.engine.VoiceProbability()
 			if !a.engine.CaptureAvailable() {
@@ -407,46 +408,46 @@ func (a *App) emitLoop() {
 	}
 }
 
-func (a *App) onConnected() {
-	a.selfID.Store(uint32(a.client.ClientID()))
-	a.forgetFailedIcons()
-	a.notify("CONNECTION_CONNECTED")
-	snap := a.client.Snapshot()
-	a.mu.Lock()
-	a.status = statusConnected
-	a.lastError = ""
-	away, awayMsg := a.away, a.awayMessage
-	reconnected := a.reconnectAttempt > 0
-	a.reconnectAttempt = 0
-	rejoin, rejoinPassword := a.lastChannel, a.lastRequest.ChannelPassword
-	a.historyKey = snap.Server.UID
-	if a.historyKey == "" {
-		a.historyKey = a.host
+func (c *conn) onConnected() {
+	c.selfID.Store(uint32(c.client.ClientID()))
+	c.forgetFailedIcons()
+	c.notify("CONNECTION_CONNECTED")
+	snap := c.client.Snapshot()
+	c.app.mu.Lock()
+	c.status = statusConnected
+	c.lastError = ""
+	away, awayMsg := c.app.away, c.app.awayMessage
+	reconnected := c.reconnectAttempt > 0
+	c.reconnectAttempt = 0
+	rejoin, rejoinPassword := c.lastChannel, c.lastRequest.ChannelPassword
+	c.historyKey = snap.Server.UID
+	if c.historyKey == "" {
+		c.historyKey = c.host
 	}
-	historyKey := a.historyKey
-	a.mu.Unlock()
+	historyKey := c.historyKey
+	c.app.mu.Unlock()
 
-	a.loadHistory(historyKey)
+	c.loadHistory(historyKey)
 	if reconnected {
-		a.addLog("success", "Reconectado")
+		c.addLog("success", "Reconectado")
 		if rejoin > 0 {
 			// volta para o canal em que estávamos
-			go a.client.JoinChannel(rejoin, rejoinPassword)
+			go c.client.JoinChannel(rejoin, rejoinPassword)
 		}
 	}
 
 	// Publica no servidor o estado que já estava escolhido na interface.
-	if a.engine.Muted() || a.engine.Deafened() {
-		a.client.SetMuteState(a.engine.Muted(), a.engine.Deafened())
+	if c.app.engine.Muted() || c.app.engine.Deafened() {
+		c.client.SetMuteState(c.app.engine.Muted(), c.app.engine.Deafened())
 	}
 	if away {
-		a.client.SetAway(true, awayMsg)
+		c.client.SetAway(true, awayMsg)
 	}
-	a.markDirty()
-	a.scriptEvent(ScriptEvent{Type: "connected", Server: snap.Server.Name})
+	c.markDirty()
+	c.scriptEvent(ScriptEvent{Type: "connected", Server: snap.Server.Name})
 
-	if !a.opts.DisableAudioDevices {
-		go a.startAudio()
+	if !c.app.opts.DisableAudioDevices {
+		go c.app.startAudio()
 	}
 }
 
@@ -458,77 +459,79 @@ func (a *App) startAudio() {
 		a.addLog("warn", err.Error()+" — você consegue ouvir, mas não falar.")
 	}
 	// A conexão pode ter caído enquanto os dispositivos abriam.
-	if !a.client.IsConnected() && !a.engine.MicTest() {
+	if !a.anyConnected() && !a.engine.MicTest() {
 		a.engine.StopCapture()
 	}
 	a.markDirty()
 }
 
-func (a *App) onDisconnected(reason string, isError bool) {
-	a.selfID.Store(0)
-	a.stopRecording() // a conversa acabou: fecha o arquivo
-	if !a.engine.MicTest() {
-		a.engine.StopCapture()
+func (c *conn) onDisconnected(reason string, isError bool) {
+	c.selfID.Store(0)
+	if c.app.recording() == c {
+		c.app.stopRecording() // a conversa acabou: fecha o arquivo
 	}
-	a.engine.ResetStreams(0)
+	if !c.app.anyConnected() && !c.app.engine.MicTest() {
+		c.app.engine.StopCapture()
+	}
+	c.app.engine.ResetStreams(c.audioID())
 
-	a.whisper.Store(&WhisperDTO{})
-	a.mu.Lock()
-	wasConnected := a.status == statusConnected
-	wasRetrying := a.reconnectAttempt > 0
-	a.status = statusDisconnected
+	c.whisper.Store(&WhisperDTO{})
+	c.app.mu.Lock()
+	wasConnected := c.status == statusConnected
+	wasRetrying := c.reconnectAttempt > 0
+	c.status = statusDisconnected
 	if isError {
-		a.lastError = reason
+		c.lastError = reason
 	}
 	// Reconecta sozinho quando a conexão cai — não quando o usuário saiu,
 	// foi expulso ou banido.
 	// (o bloqueio temporário do anti-flood também fala em "banido", mas passa sozinho)
 	flood := strings.Contains(reason, "flood")
 	removed := strings.Contains(reason, "expulso") || (strings.Contains(reason, "banido") && !flood)
-	retry := isError && !removed && !a.userDisconnect && a.settings.AutoReconnect &&
-		(wasConnected || wasRetrying) && a.reconnectAttempt < maxReconnectAttempts && a.lastRequest.Host != ""
+	retry := isError && !removed && !c.userDisconnect && c.app.settings.AutoReconnect &&
+		(wasConnected || wasRetrying) && c.reconnectAttempt < maxReconnectAttempts && c.lastRequest.Host != ""
 	var delay time.Duration
 	attempt := 0
 	if retry {
-		delay = a.scheduleReconnectLocked(reason)
-		attempt = a.reconnectAttempt
+		delay = c.scheduleReconnectLocked(reason)
+		attempt = c.reconnectAttempt
 	} else {
-		a.reconnectAttempt = 0
+		c.reconnectAttempt = 0
 	}
-	a.mu.Unlock()
+	c.app.mu.Unlock()
 
 	switch {
 	case retry && wasConnected:
-		a.addLog("error", "Desconectado: "+reason)
-		a.notify("CONNECTION_LOST_CONNECTION")
-		a.addLog("info", fmt.Sprintf("Reconectando em %d s (tentativa %d)…", int(delay.Seconds()+0.5), attempt))
+		c.addLog("error", "Desconectado: "+reason)
+		c.notify("CONNECTION_LOST_CONNECTION")
+		c.addLog("info", fmt.Sprintf("Reconectando em %d s (tentativa %d)…", int(delay.Seconds()+0.5), attempt))
 	case retry:
-		a.addLog("info", fmt.Sprintf("Ainda sem conexão (%s). Nova tentativa em %d s (tentativa %d)…", reason, int(delay.Seconds()+0.5), attempt))
+		c.addLog("info", fmt.Sprintf("Ainda sem conexão (%s). Nova tentativa em %d s (tentativa %d)…", reason, int(delay.Seconds()+0.5), attempt))
 	case isError && wasConnected:
-		a.addLog("error", "Desconectado: "+reason)
-		a.notify("CONNECTION_LOST_CONNECTION")
+		c.addLog("error", "Desconectado: "+reason)
+		c.notify("CONNECTION_LOST_CONNECTION")
 	case isError:
-		a.addLog("error", "Falha ao conectar: "+reason)
+		c.addLog("error", "Falha ao conectar: "+reason)
 	default:
-		a.addLog("info", "Desconectado do servidor")
+		c.addLog("info", "Desconectado do servidor")
 		if wasConnected {
-			a.notify("CONNECTION_DISCONNECTED")
+			c.notify("CONNECTION_DISCONNECTED")
 		}
 	}
 	if wasConnected {
-		a.scriptEvent(ScriptEvent{Type: "disconnected", Reason: reason})
+		c.scriptEvent(ScriptEvent{Type: "disconnected", Reason: reason})
 	}
-	a.markDirty()
+	c.markDirty()
 }
 
-func (a *App) onTextMessage(m ts3.TextMessage) {
-	a.mu.Lock()
-	blocked := a.settings.Contacts[m.InvokerUID] == "blocked"
-	a.mu.Unlock()
+func (c *conn) onTextMessage(m ts3.TextMessage) {
+	c.app.mu.Lock()
+	blocked := c.app.settings.Contacts[m.InvokerUID] == "blocked"
+	c.app.mu.Unlock()
 	if blocked {
 		return // contato bloqueado: as mensagens dele não aparecem
 	}
-	self := int(a.client.ClientID())
+	self := int(c.client.ClientID())
 	msg := Message{
 		Kind:        "chat",
 		Level:       "info",
@@ -542,7 +545,7 @@ func (a *App) onTextMessage(m ts3.TextMessage) {
 		// Conversa privada: o "par" é sempre o outro lado.
 		if msg.Self {
 			msg.PeerID = m.Target
-			for _, cl := range a.client.Snapshot().Clients {
+			for _, cl := range c.client.Snapshot().Clients {
 				if int(cl.ID) == m.Target {
 					msg.PeerName = cl.Nickname
 				}
@@ -552,17 +555,17 @@ func (a *App) onTextMessage(m ts3.TextMessage) {
 			msg.PeerName = m.InvokerName
 		}
 	}
-	a.addMessage(msg)
+	c.addMessage(msg)
 	// As nossas próprias mensagens não voltam para os scripts: evita que
 	// respondam a si mesmos.
-	if !msg.Self && a.scripts.anyEnabled() {
+	if !msg.Self && c.app.scripts.anyEnabled() {
 		target := map[int]string{1: "private", 2: "channel", 3: "server"}[m.TargetMode]
-		a.emit("script:event", ScriptEvent{Type: "message", Text: m.Text, Target: target, Client: a.scriptSender(m.InvokerID, m.InvokerName, m.InvokerUID)})
+		c.app.emit("script:event", ScriptEvent{Type: "message", Text: m.Text, Target: target, Client: c.scriptSender(m.InvokerID, m.InvokerName, m.InvokerUID)})
 	}
 }
 
-func (a *App) addLog(level, text string) {
-	a.addMessage(Message{Kind: "log", Level: level, Text: text})
+func (c *conn) addLog(level, text string) {
+	c.addMessage(Message{Kind: "log", Level: level, Text: text})
 }
 
 // Limites do que fica guardado (e vai para a interface) de cada mensagem. O
@@ -573,26 +576,27 @@ const (
 	maxMessageName = 256
 )
 
-func (a *App) addMessage(m Message) {
+func (c *conn) addMessage(m Message) {
 	m.Text = clipBytes(m.Text, maxMessageText)
 	m.InvokerName = clipBytes(m.InvokerName, maxMessageName)
 	m.PeerName = clipBytes(m.PeerName, maxMessageName)
-	a.mu.Lock()
-	a.nextMsgID++
-	m.ID = a.nextMsgID
+	m.Tab = c.id
+	c.app.mu.Lock()
+	c.app.nextMsgID++
+	m.ID = c.app.nextMsgID
 	m.Time = time.Now().UnixMilli()
 	if m.History && m.HistoryTime != 0 {
 		m.Time = m.HistoryTime
 	}
-	a.messages = append(a.messages, m)
-	if len(a.messages) > maxMessages {
-		a.messages = append(a.messages[:0], a.messages[len(a.messages)-maxMessages:]...)
+	c.messages = append(c.messages, m)
+	if len(c.messages) > maxMessages {
+		c.messages = append(c.messages[:0], c.messages[len(c.messages)-maxMessages:]...)
 	}
-	a.mu.Unlock()
+	c.app.mu.Unlock()
 	if !m.History {
-		a.saveHistory(m)
+		c.saveHistory(m)
 	}
-	a.emit("message", m)
+	c.app.emit("message", m)
 }
 
 // ---------------------------------------------------------------- estado
@@ -617,58 +621,108 @@ func (a *App) deviceLists() (in, out []audio.DeviceInfo) {
 	return in, out
 }
 
-func (a *App) buildState() State {
-	snap := a.client.Snapshot()
-	in, out := a.engine.DeviceNames()
-	devIn, devOut := a.deviceLists()
-	identity := a.identityDTO()
+// sync aplica o que o estado do servidor muda fora da tela: o canal em que
+// estamos (para voltar a ele ao reconectar), o volume e o mudo escolhidos para
+// cada pessoa e o codec do canal. Vale também para as conexões que não estão
+// à vista.
+func (c *conn) sync(snap ts3.Snapshot) {
+	a := c.app
+	type level struct {
+		gain  float64
+		muted bool
+	}
+	levels := make(map[uint16]level, len(snap.Clients))
+	a.mu.Lock()
+	if snap.Connected && snap.SelfChannelID != 0 {
+		c.lastChannel = snap.SelfChannelID
+	}
+	for _, cl := range snap.Clients {
+		gain := 1.0
+		if v, ok := a.settings.ClientVolumes[cl.UID]; ok {
+			gain = v / 100
+		}
+		levels[cl.ID] = level{gain, a.settings.ClientMuted[cl.UID] || a.settings.Contacts[cl.UID] == "blocked"}
+	}
+	a.mu.Unlock()
+	for id, l := range levels {
+		a.engine.SetClientGain(c.audioID(), id, l.gain)
+		a.engine.SetClientMuted(c.audioID(), id, l.muted)
+	}
+
+	codec := uint32(4)
+	for _, oc := range snap.Channels {
+		if oc.Channel.ID == snap.SelfChannelID && oc.Channel.Codec == 5 {
+			codec = 5
+		}
+	}
+	if c.codec.Swap(codec) != codec {
+		a.applyBitrate()
+	}
+}
+
+// applyBitrate ajusta a taxa do codificador ao canal da conexão em que
+// falamos: canal de música pede mais taxa; voz fica transparente com 64 kbit/s.
+func (a *App) applyBitrate() {
+	if c := a.talker(); c != nil && c.codec.Load() == 5 {
+		a.engine.SetBitrate(96000)
+	} else {
+		a.engine.SetBitrate(64000)
+	}
+}
+
+// buildState monta o estado desta conexão (e o do app) para a interface.
+func (c *conn) buildState() State {
+	snap := c.client.Snapshot()
+	c.sync(snap)
+	in, out := c.app.engine.DeviceNames()
+	devIn, devOut := c.app.deviceLists()
+	identity, identities := c.identityDTO(), c.app.identityList()
+	recordingSince := c.recordingSince()
 	whisper := WhisperDTO{}
-	if w := a.whisper.Load(); w != nil {
+	if w := c.whisper.Load(); w != nil {
 		whisper = *w
 	}
 
-	a.mu.Lock()
-	if snap.Connected && snap.SelfChannelID != 0 {
-		a.lastChannel = snap.SelfChannelID
-	}
-	volumes := make(map[string]float64, len(a.settings.ClientVolumes))
-	for k, v := range a.settings.ClientVolumes {
+	c.app.mu.Lock()
+	volumes := make(map[string]float64, len(c.app.settings.ClientVolumes))
+	for k, v := range c.app.settings.ClientVolumes {
 		volumes[k] = v
 	}
-	mutedLocally := make(map[string]bool, len(a.settings.ClientMuted))
-	for k, v := range a.settings.ClientMuted {
+	mutedLocally := make(map[string]bool, len(c.app.settings.ClientMuted))
+	for k, v := range c.app.settings.ClientMuted {
 		mutedLocally[k] = v
 	}
-	contacts := make(map[string]string, len(a.settings.Contacts))
-	for k, v := range a.settings.Contacts {
+	contacts := make(map[string]string, len(c.app.settings.Contacts))
+	for k, v := range c.app.settings.Contacts {
 		contacts[k] = v
 	}
-	hotkeyErrs := make(map[string]string, len(a.hotkeyErrs))
-	for k, v := range a.hotkeyErrs {
+	hotkeyErrs := make(map[string]string, len(c.app.hotkeyErrs))
+	for k, v := range c.app.hotkeyErrs {
 		hotkeyErrs[k] = v
 	}
 	st := State{
-		Status:           a.status,
-		Error:            a.lastError,
-		Host:             a.host,
-		ReconnectAttempt: a.reconnectAttempt,
-		AutoReconnect:    a.settings.AutoReconnect,
+		Tab:              c.id,
+		Status:           c.status,
+		Error:            c.lastError,
+		Host:             c.host,
+		ReconnectAttempt: c.reconnectAttempt,
+		AutoReconnect:    c.app.settings.AutoReconnect,
 		Identity:         identity,
-		Identities:       a.identityList(),
+		Identities:       identities,
 		AppVersion:       AppVersion,
 		AppAuthor:        AppVendor,
 		AppSite:          AppSite,
-		Screen:           a.settings.Screen.dto(),
+		Screen:           c.app.settings.Screen.dto(),
 		Platform:         runtime.GOOS,
-		PokePopup:        a.settings.PokePopup,
-		Images:           ImagesDTO{Mode: a.settings.RemoteImages, Trusted: snap.Server.UID != "" && a.settings.ImageServers[snap.Server.UID]},
-		Bookmarks:        append([]Bookmark{}, a.settings.Bookmarks...),
+		PokePopup:        c.app.settings.PokePopup,
+		Images:           ImagesDTO{Mode: c.app.settings.RemoteImages, Trusted: snap.Server.UID != "" && c.app.settings.ImageServers[snap.Server.UID]},
+		Bookmarks:        append([]Bookmark{}, c.app.settings.Bookmarks...),
 		Groups:           GroupsDTO{Server: []GroupEntry{}, Channel: []GroupEntry{}},
 		Hotkeys: HotkeysDTO{
-			PTT:          a.settings.Hotkeys["ptt"],
-			ToggleMute:   a.settings.Hotkeys["toggleMute"],
-			ToggleDeafen: a.settings.Hotkeys["toggleDeafen"],
-			SoundStop:    a.settings.Hotkeys["soundStop"],
+			PTT:          c.app.settings.Hotkeys["ptt"],
+			ToggleMute:   c.app.settings.Hotkeys["toggleMute"],
+			ToggleDeafen: c.app.settings.Hotkeys["toggleDeafen"],
+			SoundStop:    c.app.settings.Hotkeys["soundStop"],
 			Global:       hotkey.Available(),
 			Errors:       hotkeyErrs,
 		},
@@ -685,50 +739,50 @@ func (a *App) buildState() State {
 		Self: SelfDTO{
 			ClientID:       int(snap.SelfID),
 			ChannelID:      snap.SelfChannelID,
-			Nickname:       a.settings.Nickname,
-			Muted:          a.engine.Muted(),
-			Deafened:       a.engine.Deafened(),
-			RecordingSince: recordingSince(a.engine),
-			Away:           a.away,
-			AwayMessage:    a.awayMessage,
+			Nickname:       c.app.settings.Nickname,
+			Muted:          c.app.engine.Muted(),
+			Deafened:       c.app.engine.Deafened(),
+			RecordingSince: recordingSince,
+			Away:           c.app.away,
+			AwayMessage:    c.app.awayMessage,
 			Whisper:        whisper,
 		},
 		Channels: make([]ChannelDTO, 0, len(snap.Channels)),
 		Clients:  make([]ClientDTO, 0, len(snap.Clients)),
 		Audio: AudioDTO{
-			Effect:                    string(a.engine.Effect()),
+			Effect:                    string(c.app.engine.Effect()),
 			Effects:                   audio.Effects(),
-			VADMode:                   a.engine.VADMode(),
-			VADThreshold:              a.engine.VADThreshold(),
-			VADFloor:                  a.engine.VADFloor(),
-			NoiseSuppression:          a.settings.NoiseSuppression,
-			NoiseMode:                 a.settings.NoiseMode,
-			AutoGain:                  a.engine.AutoGain(),
-			EchoCancellation:          a.engine.EchoCancellation(),
+			VADMode:                   c.app.engine.VADMode(),
+			VADThreshold:              c.app.engine.VADThreshold(),
+			VADFloor:                  c.app.engine.VADFloor(),
+			NoiseSuppression:          c.app.settings.NoiseSuppression,
+			NoiseMode:                 c.app.settings.NoiseMode,
+			AutoGain:                  c.app.engine.AutoGain(),
+			EchoCancellation:          c.app.engine.EchoCancellation(),
 			EchoCancellationAvailable: audio.EchoCancellationAvailable(),
-			NormalizeVoices:           a.engine.NormalizeVoices(),
-			MicTest:                   a.engine.MicTest(),
+			NormalizeVoices:           c.app.engine.NormalizeVoices(),
+			MicTest:                   c.app.engine.MicTest(),
 			MicMode:                   audio.MicrophoneMode(),
-			OutputVolume:              a.engine.Volume(),
-			SoundboardVolume:          a.engine.Soundboard().Volume(),
-			SoundboardPlaying:         a.engine.Soundboard().IsPlaying(),
-			Sounds:                    a.soundListLocked(),
-			CaptureAvailable:          a.engine.CaptureAvailable(),
+			OutputVolume:              c.app.engine.Volume(),
+			SoundboardVolume:          c.app.engine.Soundboard().Volume(),
+			SoundboardPlaying:         c.app.engine.Soundboard().IsPlaying(),
+			Sounds:                    c.app.soundListLocked(),
+			CaptureAvailable:          c.app.engine.CaptureAvailable(),
 			InputDevice:               in,
 			OutputDevice:              out,
-			NotifySounds:              a.settings.NotifySounds,
-			NotifyPack:                a.settings.NotifyPack,
+			NotifySounds:              c.app.settings.NotifySounds,
+			NotifyPack:                c.app.settings.NotifyPack,
 			NotifyPacks:               []NotifyPackDTO{},
 			InputDevices:              devIn,
 			OutputDevices:             devOut,
-			InputChoice:               a.settings.InputDevice,
-			OutputChoice:              a.settings.OutputDevice,
+			InputChoice:               c.app.settings.InputDevice,
+			OutputChoice:              c.app.settings.OutputDevice,
 		},
 	}
-	for _, p := range a.packs {
+	for _, p := range c.app.packs {
 		st.Audio.NotifyPacks = append(st.Audio.NotifyPacks, NotifyPackDTO{ID: p.ID, Name: p.Name})
 	}
-	a.mu.Unlock()
+	c.app.mu.Unlock()
 
 	for id, g := range snap.ServerGroups {
 		st.Groups.Server = append(st.Groups.Server, GroupEntry{ID: id, Name: g.Name, IconID: g.IconID, Type: g.Type})
@@ -739,12 +793,8 @@ func (a *App) buildState() State {
 	sort.Slice(st.Groups.Server, func(i, j int) bool { return st.Groups.Server[i].ID < st.Groups.Server[j].ID })
 	sort.Slice(st.Groups.Channel, func(i, j int) bool { return st.Groups.Channel[i].ID < st.Groups.Channel[j].ID })
 
-	codec := uint32(4)
 	for _, oc := range snap.Channels {
 		ch := oc.Channel
-		if ch.ID == snap.SelfChannelID && ch.Codec == 5 {
-			codec = 5
-		}
 		st.Channels = append(st.Channels, ChannelDTO{
 			ID:              ch.ID,
 			ParentID:        ch.ParentID,
@@ -763,14 +813,6 @@ func (a *App) buildState() State {
 			IconID:          ch.IconID,
 			IsTemporary:     !ch.IsPermanent && !ch.IsSemiPermanent,
 		})
-	}
-	if a.codec.Swap(codec) != codec {
-		// Canal de música pede mais taxa; voz fica transparente com 64 kbit/s.
-		if codec == 5 {
-			a.engine.SetBitrate(96000)
-		} else {
-			a.engine.SetBitrate(64000)
-		}
 	}
 
 	for _, cl := range snap.Clients {
@@ -823,9 +865,6 @@ func (a *App) buildState() State {
 		if v, ok := volumes[cl.UID]; ok {
 			dto.Volume = v
 		}
-		// Aplica no áudio o volume/mudo escolhidos para esta pessoa.
-		a.engine.SetClientGain(0, cl.ID, dto.Volume/100)
-		a.engine.SetClientMuted(0, cl.ID, dto.MutedLocally || dto.Contact == "blocked")
 		if cl.ID == snap.SelfID {
 			st.Self.TalkRequested = cl.TalkRequest
 		}
@@ -849,7 +888,21 @@ func (a *App) buildState() State {
 
 // ---------------------------------------------------------------- ações
 
-func (a *App) connect(req ConnectRequest) error {
+// connectOptions traduz um pedido de conexão para o cliente de protocolo. É o
+// mesmo para a primeira conexão e para as reconexões: nas duas o cliente se
+// apresenta como Furito.
+func connectOptions(req ConnectRequest) ts3.ConnectOptions {
+	return ts3.ConnectOptions{
+		Host:            strings.TrimSpace(req.Host),
+		Nickname:        ts3.NormalizeNickname(req.Nickname),
+		ServerPassword:  req.ServerPassword,
+		DefaultChannel:  req.DefaultChannel,
+		ChannelPassword: req.ChannelPassword,
+		MetaData:        furitoMeta(),
+	}
+}
+
+func (c *conn) connect(req ConnectRequest) error {
 	req.Host = strings.TrimSpace(req.Host)
 	if req.Host == "" {
 		return errors.New("informe o endereço do servidor")
@@ -858,51 +911,53 @@ func (a *App) connect(req ConnectRequest) error {
 
 	// Encerra a conexão anterior antes de mudar o estado, para os eventos
 	// dela não se misturarem com os da nova.
-	a.cancelReconnect(false)
-	a.client.Disconnect()
-	if err := a.useIdentity(req.IdentityID); err != nil {
+	c.cancelReconnect(false)
+	c.client.Disconnect()
+	if err := c.useIdentity(req.IdentityID); err != nil {
 		return err
 	}
 
-	a.mu.Lock()
-	a.status = statusConnecting
-	a.lastError = ""
-	a.userDisconnect = false
-	a.lastRequest = req
-	a.lastChannel = 0
-	a.host = req.Host
-	a.settings.Host = req.Host
-	a.settings.Nickname = nickname
-	a.settings.DefaultChannel = req.DefaultChannel
-	a.scheduleSaveLocked()
-	a.mu.Unlock()
+	c.app.mu.Lock()
+	c.status = statusConnecting
+	c.lastError = ""
+	c.userDisconnect = false
+	c.lastRequest = req
+	c.lastChannel = 0
+	c.host = req.Host
+	c.app.settings.Host = req.Host
+	c.app.settings.Nickname = nickname
+	c.app.settings.DefaultChannel = req.DefaultChannel
+	c.app.scheduleSaveLocked()
+	c.app.mu.Unlock()
 	// Emite na hora (sem agrupar): numa rede local a conexão termina antes
 	// do agrupamento e a interface nunca veria o estado "conectando".
-	a.emit("state", a.buildState())
-	a.addLog("info", fmt.Sprintf("Tentando conectar-se ao servidor [b]%s[/b]", req.Host))
+	if c == c.app.current() {
+		c.app.emit("state", c.buildState())
+	} else {
+		c.markDirty()
+	}
+	c.addLog("info", fmt.Sprintf("Tentando conectar-se ao servidor [b]%s[/b]", req.Host))
 
-	err := a.client.Connect(ts3.ConnectOptions{
-		Host:            req.Host,
-		Nickname:        nickname,
-		ServerPassword:  req.ServerPassword,
-		DefaultChannel:  req.DefaultChannel,
-		ChannelPassword: req.ChannelPassword,
-		MetaData:        furitoMeta(),
-	})
+	err := c.client.Connect(connectOptions(req))
 	if err != nil {
-		a.mu.Lock()
-		a.status = statusDisconnected
-		a.lastError = err.Error()
-		a.mu.Unlock()
-		a.addLog("error", "Falha ao conectar: "+err.Error())
-		a.markDirty()
+		c.app.mu.Lock()
+		c.status = statusDisconnected
+		c.lastError = err.Error()
+		c.app.mu.Unlock()
+		c.addLog("error", "Falha ao conectar: "+err.Error())
+		c.markDirty()
 		return err
 	}
 	return nil
 }
 
+// publishMuteState conta a todos os servidores como estão o microfone e os
+// alto-falantes: mutar vale para o app inteiro.
 func (a *App) publishMuteState() {
-	a.client.SetMuteState(a.engine.Muted(), a.engine.Deafened())
+	muted, deafened := a.engine.Muted(), a.engine.Deafened()
+	for _, c := range a.connList() {
+		c.client.SetMuteState(muted, deafened)
+	}
 	a.markDirty()
 }
 

@@ -11,6 +11,9 @@ import (
 // ---- Tipos trocados com a interface (o contrato do frontend) ----
 
 type State struct {
+	// Tab é a conexão (aba) que este estado descreve; o que é do app (áudio,
+	// identidades, favoritos, atalhos) vem junto, igual em todas.
+	Tab    int    `json:"tab"`
 	Status string `json:"status"` // disconnected | connecting | connected | reconnecting
 	Error  string `json:"error"`
 	Host   string `json:"host"`
@@ -193,6 +196,7 @@ type SoundDTO struct {
 
 type Message struct {
 	ID          int    `json:"id"`
+	Tab         int    `json:"tab"`        // a conexão (aba) a que a mensagem pertence
 	Time        int64  `json:"time"`       // unix ms
 	Kind        string `json:"kind"`       // log | chat
 	Level       string `json:"level"`      // info | success | warn | error
@@ -239,20 +243,25 @@ type ConnectSettings struct {
 	DefaultChannel string `json:"defaultChannel"`
 }
 
-// API é o conjunto de métodos exposto para a interface
-// (window.go.backend.API.* no Wails). Só o que a UI pode chamar fica aqui.
+// API é o conjunto de métodos que a interface pode chamar. Cada valor age
+// numa conexão (c): a interface chega aqui por Bridge.Call, que diz de que aba
+// é o pedido. Só o que a UI pode chamar fica aqui.
 type API struct {
 	app *App
+	c   *conn
 }
 
-func (a *App) API() *API { return &API{app: a} }
+// API devolve a API da conexão que está à vista.
+func (a *App) API() *API { return a.current().api() }
 
-func (api *API) GetState() State { return api.app.buildState() }
+func (c *conn) api() *API { return &API{app: c.app, c: c} }
+
+func (api *API) GetState() State { return api.c.buildState() }
 
 func (api *API) GetMessages() []Message {
 	api.app.mu.Lock()
 	defer api.app.mu.Unlock()
-	return append([]Message{}, api.app.messages...)
+	return append([]Message{}, api.c.messages...)
 }
 
 func (api *API) GetSettings() ConnectSettings {
@@ -262,16 +271,16 @@ func (api *API) GetSettings() ConnectSettings {
 	return ConnectSettings{Host: s.Host, Nickname: s.Nickname, DefaultChannel: s.DefaultChannel}
 }
 
-func (api *API) Connect(req ConnectRequest) error { return api.app.connect(req) }
+func (api *API) Connect(req ConnectRequest) error { return api.c.connect(req) }
 
 // Disconnect sai do servidor (e desiste de reconectar, se estava tentando).
 func (api *API) Disconnect() {
-	api.app.cancelReconnect(true)
-	api.app.client.Disconnect()
+	api.c.cancelReconnect(true)
+	api.c.client.Disconnect()
 }
 
 func (api *API) JoinChannel(channelID int, password string) {
-	api.app.client.JoinChannel(channelID, password)
+	api.c.client.JoinChannel(channelID, password)
 }
 
 func (api *API) SendText(targetMode, target int, text string) error {
@@ -281,10 +290,10 @@ func (api *API) SendText(targetMode, target int, text string) error {
 	if targetMode < 1 || targetMode > 3 {
 		return errors.New("destino de mensagem inválido")
 	}
-	if !api.app.client.IsConnected() {
+	if !api.c.client.IsConnected() {
 		return errors.New("não conectado")
 	}
-	api.app.client.SendTextMessage(targetMode, target, text)
+	api.c.client.SendTextMessage(targetMode, target, text)
 	return nil
 }
 
@@ -318,7 +327,9 @@ func (api *API) SetAway(away bool, message string) {
 	api.app.away = away
 	api.app.awayMessage = message
 	api.app.mu.Unlock()
-	api.app.client.SetAway(away, message)
+	for _, c := range api.app.connList() { // ausente vale para o app inteiro
+		c.client.SetAway(away, message)
+	}
 	api.app.markDirty()
 	if changed && away {
 		api.app.notify("STATUS_SET_AWAY")
@@ -328,10 +339,10 @@ func (api *API) SetAway(away bool, message string) {
 }
 
 // GetIcon devolve a imagem (data URL) de um ícone guardado no servidor.
-func (api *API) GetIcon(id int64) (string, error) { return api.app.icon(uint32(id)) }
+func (api *API) GetIcon(id int64) (string, error) { return api.c.icon(uint32(id)) }
 
 // GetAvatar devolve a imagem (data URL) do avatar de um cliente.
-func (api *API) GetAvatar(clientID int) (string, error) { return api.app.avatar(clientID) }
+func (api *API) GetAvatar(clientID int) (string, error) { return api.c.avatar(clientID) }
 
 // SetNotifySounds liga/desliga os avisos sonoros.
 func (api *API) SetNotifySounds(on bool) {
@@ -401,7 +412,7 @@ func (api *API) CalibrateVoice() (VoiceCalibration, error) {
 		a.markDirty()
 	}
 	voice, floor, err := a.engine.CalibrateVoice(calibrationTime)
-	if opened && !a.client.IsConnected() && !a.engine.MicTest() {
+	if opened && !a.anyConnected() && !a.engine.MicTest() {
 		a.engine.StopCapture()
 		a.markDirty()
 	}
@@ -465,7 +476,7 @@ func (api *API) SetEchoCancellation(on bool) error {
 	applied := api.app.engine.EchoCancellation()
 	api.app.updateSettings(func(s *Settings) { s.EchoCancellation = applied })
 	if err != nil {
-		api.app.addLog("warn", err.Error())
+		api.c.addLog("warn", err.Error())
 	}
 	return err
 }
@@ -481,7 +492,7 @@ func (api *API) SetMicTest(on bool) {
 	switch {
 	case on && !api.app.opts.DisableAudioDevices:
 		go api.app.startAudio()
-	case !on && !api.app.client.IsConnected():
+	case !on && !api.app.anyConnected():
 		api.app.engine.StopCapture()
 	}
 	api.app.markDirty()
@@ -532,11 +543,11 @@ func (api *API) SoundboardRemove(id string) error { return api.app.removeSound(i
 func (api *API) SoundboardRename(id, name string) error { return api.app.renameSound(id, name) }
 
 func (api *API) RequestChannelInfo(channelID int) {
-	api.app.client.RequestChannelDescription(channelID)
+	api.c.client.RequestChannelDescription(channelID)
 }
 
 func (api *API) RequestClientInfo(clientID int) {
 	if clientID > 0 && clientID <= 0xFFFF {
-		api.app.client.RequestClientInfo(uint16(clientID))
+		api.c.client.RequestClientInfo(uint16(clientID))
 	}
 }

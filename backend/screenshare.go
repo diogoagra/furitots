@@ -199,21 +199,21 @@ func (api *API) ScreenSend(toClientID int, payload string) error {
 		return err
 	}
 	if toClientID == 0 {
-		return api.app.client.SendPluginCommand(screenPluginName, wire)
+		return api.c.client.SendPluginCommand(screenPluginName, wire)
 	}
 	if toClientID < 0 || toClientID > 0xFFFF {
 		return errors.New("cliente inválido")
 	}
-	return api.app.client.SendPluginCommand(screenPluginName, wire, uint16(toClientID))
+	return api.c.client.SendPluginCommand(screenPluginName, wire, uint16(toClientID))
 }
 
-func (a *App) onPluginCommand(cmd ts3.PluginCommand) {
+func (c *conn) onPluginCommand(cmd ts3.PluginCommand) {
 	if cmd.Name != screenPluginName {
 		return
 	}
-	a.mu.Lock()
-	blocked := a.settings.Contacts[cmd.FromUID] == "blocked"
-	a.mu.Unlock()
+	c.app.mu.Lock()
+	blocked := c.app.settings.Contacts[cmd.FromUID] == "blocked"
+	c.app.mu.Unlock()
 	if blocked {
 		return
 	}
@@ -221,7 +221,7 @@ func (a *App) onPluginCommand(cmd ts3.PluginCommand) {
 	if !ok {
 		return
 	}
-	a.emit("screen:signal", ScreenSignalDTO{From: int(cmd.FromID), FromName: cmd.FromName, Payload: payload})
+	c.app.emit("screen:signal", ScreenSignalDTO{From: int(cmd.FromID), FromName: cmd.FromName, Payload: payload})
 }
 
 // ---------------------------------------------------------------- captura nativa

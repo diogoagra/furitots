@@ -23,17 +23,17 @@ func TestRecordingLifecycle(t *testing.T) {
 	}
 
 	at := time.Date(2026, 11, 12, 7, 45, 10, 0, time.Local)
-	path, err := app.startRecording(at)
+	path, err := app.current().startRecording(at)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := filepath.Join(app.opts.RecordingsDir, "2026-11-12 07.45.10.wav"); path != want {
 		t.Errorf("arquivo %q, esperado %q", path, want)
 	}
-	if app.buildState().Self.RecordingSince == 0 {
+	if app.current().buildState().Self.RecordingSince == 0 {
 		t.Error("o estado deveria mostrar a gravação em andamento")
 	}
-	if _, err := app.startRecording(at); err == nil {
+	if _, err := app.current().startRecording(at); err == nil {
 		t.Error("uma segunda gravação ao mesmo tempo deveria ser recusada")
 	}
 
@@ -42,7 +42,7 @@ func TestRecordingLifecycle(t *testing.T) {
 	if err != nil || res.Recording || res.Path != path {
 		t.Fatalf("parar a gravação: %+v, %v", res, err)
 	}
-	if app.buildState().Self.RecordingSince != 0 {
+	if app.current().buildState().Self.RecordingSince != 0 {
 		t.Error("o estado ainda mostra gravação depois de parar")
 	}
 	data, err := os.ReadFile(path)
@@ -60,7 +60,7 @@ func TestRecordingLifecycle(t *testing.T) {
 	}
 
 	// Fechar o app com uma gravação em andamento fecha o arquivo.
-	path2, err := app.startRecording(at.Add(time.Minute))
+	path2, err := app.current().startRecording(at.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}

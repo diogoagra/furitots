@@ -95,7 +95,7 @@ func TestLiveAvatar(t *testing.T) {
 	}
 
 	img, hash := avatarPNG(t, 40)
-	if err := owner.client.SetAvatar(img); err != nil {
+	if err := owner.current().client.SetAvatar(img); err != nil {
 		t.Fatalf("pôr o avatar: %v", err)
 	}
 	waitFor(t, "a marca do avatar chegar ao estado", 4*time.Second, func() bool { return clientOf(viewerEm, ownerID).Avatar == hash })
@@ -130,7 +130,7 @@ func TestLiveAvatar(t *testing.T) {
 
 	// troca: marca nova, imagem nova
 	img2, hash2 := avatarPNG(t, 210)
-	if err := owner.client.SetAvatar(img2); err != nil {
+	if err := owner.current().client.SetAvatar(img2); err != nil {
 		t.Fatalf("trocar o avatar: %v", err)
 	}
 	waitFor(t, "a marca nova chegar", 4*time.Second, func() bool { return clientOf(viewerEm, ownerID).Avatar == hash2 })
@@ -141,7 +141,7 @@ func TestLiveAvatar(t *testing.T) {
 		time.Sleep(hold)
 	}
 
-	if err := owner.client.SetAvatar(nil); err != nil {
+	if err := owner.current().client.SetAvatar(nil); err != nil {
 		t.Fatalf("tirar o avatar: %v", err)
 	}
 	waitFor(t, "a marca sumir", 4*time.Second, func() bool { return clientOf(viewerEm, ownerID).Avatar == "" })

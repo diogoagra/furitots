@@ -62,7 +62,7 @@ func main() {
 	var startHotkeys sync.Once
 	// Só a API vai para a janela; os ganchos de desenvolvimento entram apenas
 	// em executáveis compilados para isso (ver devhooks.go).
-	bind := append([]interface{}{app.API()}, devBindings(app)...)
+	bind := append([]interface{}{app.Bridge()}, devBindings(app)...)
 
 	err = wails.Run(&options.App{
 		Title:     "Furito TS",

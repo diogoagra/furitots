@@ -289,6 +289,7 @@
   // ------------------------------------------------------------------ estado
   function emptyState() {
     return {
+      tab: 0,
       status: 'disconnected', error: '', host: '', reconnectAttempt: 0, autoReconnect: false,
       server: { name: '', welcomeMessage: '', version: '', platform: '', maxClients: 0, uid: '', bannerUrl: '', bannerLink: '' },
       self: { clientId: 0, channelId: 0, nickname: '', muted: false, deafened: false, away: false, awayMessage: '', talkRequested: false, recordingSince: 0, whisper: { kind: '', id: 0, name: '' } },
@@ -322,6 +323,7 @@
     hotkeys.errors = hotkeys.errors || {};
     const groups = s.groups || {};
     return {
+      tab: Number(s.tab) || 0,
       status: s.status || 'disconnected',
       error: s.error || '',
       host: s.host || '',
@@ -1384,6 +1386,7 @@
   // ------------------------------------------------------------------ eventos do backend
   function onState(raw) {
     state = normalize(raw);
+    bridge.tab = state.tab; // os pedidos ao backend passam a dizer que são desta aba
     if (state.status === 'connected' && prevStatus !== 'connected') {
       // nova conexão: ids de clientes antigos não valem mais
       for (const key of tabOrder.slice()) if (tabs.get(key).kind === 'private') closeTab(key);

@@ -1,11 +1,15 @@
 /*
  * bridge.js — ponte entre a UI e o backend Go (Wails v2).
  *
- * Real:  window.go.backend.API.<Método>()  +  window.runtime.EventsOn(nome, cb)
+ * Real:  window.go.backend.Bridge.Call(aba, método, argumentos)  +  window.runtime.EventsOn(nome, cb)
  * Mock:  usado quando a página é aberta num navegador comum (sem Wails) ou com ?mock na URL.
  *
  * Uso:  const bridge = await window.FuritoBridge.init();
  *       bridge.api.Connect({...});  bridge.on('state', cb);  bridge.openURL(url);
+ *
+ * Cada servidor conectado é uma aba. bridge.api age na aba em bridge.tab (0 = a
+ * que está à vista); bridge.forTab(id) devolve a API presa a uma aba, para o
+ * que continua valendo depois que a pessoa troca de aba.
  */
 (function () {
   'use strict';
@@ -19,7 +23,18 @@
   }
 
   function findApi() {
-    return (window.go && window.go.backend && window.go.backend.API) || null;
+    return (window.go && window.go.backend && window.go.backend.Bridge) || null;
+  }
+
+  // apiFor devolve um objeto com os métodos da API: cada chamada vira
+  // Bridge.Call(aba, nome, argumentos). tab() diz a aba na hora da chamada.
+  function apiFor(root, tab) {
+    return new Proxy({}, {
+      get(_, name) {
+        if (typeof name !== 'string' || name === 'then') return undefined; // não é uma Promise
+        return (...args) => root.Call(tab(), name, args);
+      },
+    });
   }
 
   function waitForApi(timeoutMs) {
@@ -41,19 +56,22 @@
 
   async function init() {
     if (!forceMock) {
-      const api = await waitForApi(inWails() ? 5000 : 0);
-      if (api) {
-        return {
+      const root = await waitForApi(inWails() ? 5000 : 0);
+      if (root) {
+        const bridge = {
           isMock: false,
           missingBackend: false,
-          api,
+          tab: 0,
+          forTab: (id) => apiFor(root, () => id),
           on(name, cb) { window.runtime.EventsOn(name, cb); },
           openURL: openExternal,
         };
+        bridge.api = apiFor(root, () => bridge.tab);
+        return bridge;
       }
     }
     const mock = createMock(params);
-    return { isMock: true, missingBackend: !forceMock && inWails(), api: mock.api, on: mock.on, openURL: openExternal };
+    return { isMock: true, missingBackend: !forceMock && inWails(), tab: 0, api: mock.api, forTab: () => mock.api, on: mock.on, openURL: openExternal };
   }
 
   // ------------------------------------------------------------------ MOCK
