@@ -13,10 +13,11 @@ import (
 type State struct {
 	// Tab é a conexão (aba) que este estado descreve; o que é do app (áudio,
 	// identidades, favoritos, atalhos) vem junto, igual em todas.
-	Tab    int    `json:"tab"`
-	Status string `json:"status"` // disconnected | connecting | connected | reconnecting
-	Error  string `json:"error"`
-	Host   string `json:"host"`
+	Tab    int      `json:"tab"`
+	Tabs   []TabDTO `json:"tabs"`   // todas as abas, na ordem em que aparecem
+	Status string   `json:"status"` // disconnected | connecting | connected | reconnecting
+	Error  string   `json:"error"`
+	Host   string   `json:"host"`
 
 	ReconnectAttempt int                `json:"reconnectAttempt"` // 0 = não está reconectando
 	AutoReconnect    bool               `json:"autoReconnect"`
@@ -221,9 +222,12 @@ type ImagesDTO struct {
 	Trusted bool   `json:"trusted"` // o usuário mandou carregar sempre as deste servidor
 }
 
+// Talking diz quem está falando agora. Clients e Self são da aba à vista.
 type Talking struct {
 	Clients   []int   `json:"clients"`
 	Self      bool    `json:"self"`
+	Tx        bool    `json:"tx"`   // estamos transmitindo (na aba do microfone, que pode não ser a que está à vista)
+	Tabs      []int   `json:"tabs"` // abas em que alguém está falando
 	MicLevel  float64 `json:"micLevel"`
 	VoiceProb float64 `json:"voiceProb"` // 0..1: o quanto o detector vê voz
 }

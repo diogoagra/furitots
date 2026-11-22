@@ -2,6 +2,7 @@ package backend
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,8 @@ type conn struct {
 	userDisconnect   bool
 	lastChannel      int
 	historyKey       string
+	silenced         bool // "silenciar esta aba": as vozes deste servidor não tocam
+	unread           int  // mensagens de bate-papo recebidas com a aba fora da vista
 
 	// protegidos por app.identMu:
 	identity *ts3.Identity // a identidade em uso nesta conexão (a de identID)
@@ -134,8 +137,30 @@ func (c *conn) markDirty() {
 	c.app.wake()
 }
 
-// notify toca o aviso sonoro de um evento desta conexão.
-func (c *conn) notify(event string) { c.app.notify(event) }
+// notify toca o aviso sonoro de um evento desta conexão. A que está à vista
+// toca todos; das outras só toca o que é com a pessoa (cutucada, ser movida,
+// expulsa ou banida, a conexão cair ou voltar): o entra-e-sai de um servidor
+// que ela não está vendo não diria nada.
+func (c *conn) notify(event string) {
+	if c != c.app.current() && !notifyFromAnyTab(event) {
+		return
+	}
+	c.app.notify(event)
+}
+
+func notifyFromAnyTab(event string) bool {
+	return event == "OTHER_RECEIVED_POKE" || strings.HasPrefix(event, "YOU_") || strings.HasPrefix(event, "CONNECTION_")
+}
+
+// publishMuteState conta a este servidor como estão o microfone e os
+// alto-falantes. Aba silenciada aparece com os alto-falantes mutados.
+func (c *conn) publishMuteState() {
+	a := c.app
+	a.mu.Lock()
+	silenced := c.silenced
+	a.mu.Unlock()
+	c.client.SetMuteState(a.engine.Muted(), a.engine.Deafened() || silenced)
+}
 
 // addLog põe uma linha no registro da conexão que está à vista: é onde vão os
 // avisos que não são de um servidor (soundboard, atalhos, dispositivos).

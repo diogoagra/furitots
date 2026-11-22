@@ -21,6 +21,7 @@ type fakeEmitter struct {
 	messages []Message
 	talking  []Talking
 	pokes    int
+	lastPoke PokeDTO
 	other    map[string][]any // demais eventos, por nome
 }
 
@@ -36,6 +37,7 @@ func (f *fakeEmitter) Emit(event string, data any) {
 		f.talking = append(f.talking, v)
 	case PokeDTO:
 		f.pokes++
+		f.lastPoke = v
 	default:
 		if f.other == nil {
 			f.other = make(map[string][]any)

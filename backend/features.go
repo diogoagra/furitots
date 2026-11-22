@@ -130,6 +130,8 @@ type FileEntryDTO struct {
 }
 
 type PokeDTO struct {
+	Tab      int    `json:"tab"`    // a aba (o servidor) em que fomos cutucados
+	Server   string `json:"server"` // nome desse servidor
 	FromName string `json:"fromName"`
 	Message  string `json:"message"`
 }
@@ -305,7 +307,13 @@ func (a *App) setMic(c *conn) {
 	} else {
 		a.engine.SetTxConn(0, false)
 	}
-	a.mic.Store(c)
+	old := a.mic.Swap(c)
+	if old != nil && old != c {
+		old.client.SetInputHardware(false)
+	}
+	if c != nil {
+		c.client.SetInputHardware(true)
+	}
 	a.applyBitrate()
 	a.markDirty()
 }
@@ -521,23 +529,32 @@ func (api *API) DeleteBookmark(id string) {
 }
 
 func (api *API) ConnectBookmark(id string) error {
-	api.app.mu.Lock()
+	req, err := api.app.bookmarkRequest(id)
+	if err != nil {
+		return err
+	}
+	return api.c.connect(req)
+}
+
+// bookmarkRequest monta o pedido de conexão de um favorito.
+func (a *App) bookmarkRequest(id string) (ConnectRequest, error) {
+	a.mu.Lock()
 	var found *Bookmark
-	for i := range api.app.settings.Bookmarks {
-		if api.app.settings.Bookmarks[i].ID == id {
-			b := api.app.settings.Bookmarks[i]
+	for i := range a.settings.Bookmarks {
+		if a.settings.Bookmarks[i].ID == id {
+			b := a.settings.Bookmarks[i]
 			found = &b
 		}
 	}
-	nickname := api.app.settings.Nickname
-	api.app.mu.Unlock()
+	nickname := a.settings.Nickname
+	a.mu.Unlock()
 	if found == nil {
-		return errors.New("favorito não encontrado")
+		return ConnectRequest{}, errors.New("favorito não encontrado")
 	}
 	if found.Nickname != "" {
 		nickname = found.Nickname
 	}
-	return api.c.connect(ConnectRequest{Host: found.Host, Nickname: nickname, DefaultChannel: found.DefaultChannel, IdentityID: found.IdentityID})
+	return ConnectRequest{Host: found.Host, Nickname: nickname, DefaultChannel: found.DefaultChannel, IdentityID: found.IdentityID}, nil
 }
 
 // Modos de Settings.RemoteImages.

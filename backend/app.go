@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -115,6 +116,7 @@ type App struct {
 	notifyCache map[string][]int16
 
 	hotkeyErrs map[string]string
+	lastTabs   []TabDTO // o último resumo das abas publicado (só o laço de publicação usa)
 	devicesAt  time.Time
 	devicesIn  []audio.DeviceInfo
 	devicesOut []audio.DeviceInfo
@@ -250,7 +252,7 @@ func (c *conn) onPoke(from, message string) {
 	popup := c.app.settings.PokePopup
 	c.app.mu.Unlock()
 	if popup {
-		c.app.emit("poke", PokeDTO{FromName: from, Message: message})
+		c.app.emit("poke", PokeDTO{Tab: c.id, Server: c.client.ServerName(), FromName: from, Message: message})
 	}
 	if c.app.scripts.anyEnabled() {
 		c.app.emit("script:event", ScriptEvent{Type: "poke", Text: message, Client: c.scriptSender(0, from, "")})
@@ -328,8 +330,14 @@ func (a *App) publish() {
 			c.sync(c.client.Snapshot())
 		}
 	}
-	if emit {
+	tabs := a.tabList()
+	switch {
+	case emit:
+		a.lastTabs = tabs
 		a.emit("state", view.buildState())
+	case !sameTabs(tabs, a.lastTabs): // só o resumo mudou (uma aba fora da vista)
+		a.lastTabs = tabs
+		a.emit("tabs", tabs)
 	}
 }
 
@@ -356,7 +364,8 @@ func (a *App) emitLoop() {
 	defer ticker.Stop()
 
 	var lastTalking []uint16
-	lastSelf, lastSB := false, false
+	var lastBusy []uint32
+	lastSelf, lastTx, lastSB := false, false, false
 	lastLevel, lastProb := -1.0, -1.0
 	lastMode, modeTick := "", 0
 
@@ -386,8 +395,11 @@ func (a *App) emitLoop() {
 					a.markDirty()
 				}
 			}
-			talking := a.engine.TalkingClients(a.current().audioID())
-			self := a.engine.Transmitting()
+			view := a.current()
+			talking := a.engine.TalkingClients(view.audioID())
+			tx := a.engine.Transmitting()
+			self := tx && a.talker() == view // o nosso nome só acende na aba em que falamos
+			busy := a.engine.TalkingConns()
 			level, prob := a.engine.MicLevel(), a.engine.VoiceProbability()
 			if !a.engine.CaptureAvailable() {
 				level, prob = 0, 0
@@ -395,15 +407,19 @@ func (a *App) emitLoop() {
 			if prob < 0.01 {
 				prob = 0
 			}
-			if self == lastSelf && level == lastLevel && prob == lastProb && sameIDs(talking, lastTalking) {
+			if self == lastSelf && tx == lastTx && level == lastLevel && prob == lastProb && sameIDs(talking, lastTalking) && slices.Equal(busy, lastBusy) {
 				continue
 			}
-			lastTalking, lastSelf, lastLevel, lastProb = talking, self, level, prob
+			lastTalking, lastSelf, lastTx, lastLevel, lastProb, lastBusy = talking, self, tx, level, prob, busy
 			ids := make([]int, len(talking))
 			for i, id := range talking {
 				ids[i] = int(id)
 			}
-			a.emit("talking", Talking{Clients: ids, Self: self, MicLevel: level, VoiceProb: prob})
+			tabs := make([]int, len(busy))
+			for i, id := range busy {
+				tabs[i] = int(id)
+			}
+			a.emit("talking", Talking{Clients: ids, Self: self, Tx: tx, Tabs: tabs, MicLevel: level, VoiceProb: prob})
 		}
 	}
 }
@@ -437,9 +453,8 @@ func (c *conn) onConnected() {
 	}
 
 	// Publica no servidor o estado que já estava escolhido na interface.
-	if c.app.engine.Muted() || c.app.engine.Deafened() {
-		c.client.SetMuteState(c.app.engine.Muted(), c.app.engine.Deafened())
-	}
+	c.app.claimMic(c)
+	c.publishMuteState()
 	if away {
 		c.client.SetAway(true, awayMsg)
 	}
@@ -499,6 +514,9 @@ func (c *conn) onDisconnected(reason string, isError bool) {
 		c.reconnectAttempt = 0
 	}
 	c.app.mu.Unlock()
+	if !retry {
+		c.app.releaseMic(c) // enquanto houver nova tentativa, o microfone espera por ela
+	}
 
 	switch {
 	case retry && wasConnected:
@@ -592,7 +610,14 @@ func (c *conn) addMessage(m Message) {
 	if len(c.messages) > maxMessages {
 		c.messages = append(c.messages[:0], c.messages[len(c.messages)-maxMessages:]...)
 	}
+	unseen := c.app.view != c && m.Kind == "chat" && !m.Self && !m.History
+	if unseen {
+		c.unread++
+	}
 	c.app.mu.Unlock()
+	if unseen {
+		c.markDirty() // a barra de abas mostra que há mensagem nova
+	}
 	if !m.History {
 		c.saveHistory(m)
 	}
@@ -677,6 +702,7 @@ func (c *conn) buildState() State {
 	in, out := c.app.engine.DeviceNames()
 	devIn, devOut := c.app.deviceLists()
 	identity, identities := c.identityDTO(), c.app.identityList()
+	tabs := c.app.tabList()
 	recordingSince := c.recordingSince()
 	whisper := WhisperDTO{}
 	if w := c.whisper.Load(); w != nil {
@@ -702,6 +728,7 @@ func (c *conn) buildState() State {
 	}
 	st := State{
 		Tab:              c.id,
+		Tabs:             tabs,
 		Status:           c.status,
 		Error:            c.lastError,
 		Host:             c.host,
@@ -954,9 +981,8 @@ func (c *conn) connect(req ConnectRequest) error {
 // publishMuteState conta a todos os servidores como estão o microfone e os
 // alto-falantes: mutar vale para o app inteiro.
 func (a *App) publishMuteState() {
-	muted, deafened := a.engine.Muted(), a.engine.Deafened()
 	for _, c := range a.connList() {
-		c.client.SetMuteState(muted, deafened)
+		c.publishMuteState()
 	}
 	a.markDirty()
 }
