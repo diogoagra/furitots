@@ -90,12 +90,12 @@ func TestChatHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.mu.Lock()
-	app.historyKey = "servidor-A"
+	app.view.historyKey = "servidor-A"
 	app.mu.Unlock()
-	app.addMessage(Message{Kind: "chat", TargetMode: 2, InvokerName: "Leko", Text: "bora jogar?"})
-	app.addMessage(Message{Kind: "chat", TargetMode: 3, InvokerName: "Furico", Text: "aviso geral", Self: true})
-	app.addMessage(Message{Kind: "chat", TargetMode: 1, InvokerName: "Leko", Text: "segredo"}) // privado: não é guardado
-	app.addLog("info", "linha de log")                                                         // log: não é guardado
+	app.current().addMessage(Message{Kind: "chat", TargetMode: 2, InvokerName: "Leko", Text: "bora jogar?"})
+	app.current().addMessage(Message{Kind: "chat", TargetMode: 3, InvokerName: "Furico", Text: "aviso geral", Self: true})
+	app.current().addMessage(Message{Kind: "chat", TargetMode: 1, InvokerName: "Leko", Text: "segredo"}) // privado: não é guardado
+	app.addLog("info", "linha de log")                                                                   // log: não é guardado
 	app.Shutdown()
 
 	app2, err := NewApp(opts)
@@ -103,11 +103,11 @@ func TestChatHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app2.Shutdown()
-	app2.loadHistory("servidor-B")
+	app2.current().loadHistory("servidor-B")
 	if n := len(app2.API().GetMessages()); n != 0 {
 		t.Fatalf("o histórico é por servidor; outro servidor trouxe %d linhas", n)
 	}
-	app2.loadHistory("servidor-A")
+	app2.current().loadHistory("servidor-A")
 	msgs := app2.API().GetMessages()
 	if len(msgs) != 2 || !msgs[0].History || msgs[0].Text != "bora jogar?" || msgs[1].TargetMode != 3 || !msgs[1].Self {
 		t.Fatalf("histórico carregado: %+v", msgs)
@@ -116,12 +116,12 @@ func TestChatHistory(t *testing.T) {
 		t.Errorf("a hora original deveria ser mantida: %v", time.UnixMilli(msgs[0].Time))
 	}
 	// linhas vindas do histórico não são gravadas de novo
-	app2.loadHistory("servidor-A")
+	app2.current().loadHistory("servidor-A")
 	if err := app2.API().ClearHistory(); err != nil {
 		t.Fatal(err)
 	}
 	before := len(app2.API().GetMessages())
-	app2.loadHistory("servidor-A")
+	app2.current().loadHistory("servidor-A")
 	if len(app2.API().GetMessages()) != before {
 		t.Error("depois de apagar, não deveria haver histórico")
 	}
@@ -442,7 +442,7 @@ func TestLiveImportedTS3Identity(t *testing.T) {
 	// Servidores TS3 identificam pelo SHA-1 da chave pública (o UID que o
 	// cliente TS3 mostra); servidores TS6, pelo SHA-256 da mesma chave.
 	app.identMu.Lock()
-	long := sha256.Sum256([]byte(app.identity.OmegaStr))
+	long := sha256.Sum256([]byte(app.current().identity.OmegaStr))
 	app.identMu.Unlock()
 	ts6UID := base64.StdEncoding.EncodeToString(long[:])
 	t.Logf("conectado; nível de segurança %d; UID visto pelo servidor é o da identidade importada: formato TS3=%v, formato TS6=%v",
@@ -494,8 +494,8 @@ func TestLiveFuritoVersionShown(t *testing.T) {
 	}{{emA, "FuritoVerB"}, {emB, "FuritoVerA"}, {emA, "FuritoVerA"}} {
 		waitFor(t, "ver "+c.nick+" como cliente Furito", 5*time.Second, func() bool { return seen(c.em, c.nick).Furito })
 		got := seen(c.em, c.nick)
-		if got.Version != AppVersion || got.Platform != AppVendor {
-			t.Errorf("%s aparece como %q %q, esperado %q %q", c.nick, got.Version, got.Platform, AppVersion, AppVendor)
+		if want := AppName + " " + AppVersion; got.Version != want || got.Platform != "" {
+			t.Errorf("%s aparece como %q %q, esperado %q e sem plataforma", c.nick, got.Version, got.Platform, want)
 		}
 	}
 	st, _ := emA.lastState()
@@ -687,7 +687,7 @@ func TestPokePopupOption(t *testing.T) {
 	if !api.GetState().PokePopup {
 		t.Fatal("por padrão a cutucada deveria abrir uma janela")
 	}
-	app.onPoke("Fulano", "oi")
+	app.current().onPoke("Fulano", "oi")
 	if pokes() != 1 {
 		t.Errorf("com a opção ligada a interface deveria ser avisada: %d", pokes())
 	}
@@ -695,7 +695,7 @@ func TestPokePopupOption(t *testing.T) {
 	if api.GetState().PokePopup {
 		t.Error("a opção desligada deveria aparecer no estado")
 	}
-	app.onPoke("Fulano", "oi de novo")
+	app.current().onPoke("Fulano", "oi de novo")
 	if pokes() != 1 {
 		t.Errorf("com a opção desligada nenhuma janela deveria ser pedida: %d avisos", pokes())
 	}
@@ -824,19 +824,19 @@ func TestSoundHotkeys(t *testing.T) {
 func TestChatHistoryIsBounded(t *testing.T) {
 	app, _ := newTestApp(t)
 	app.mu.Lock()
-	app.historyKey = "servidor-hostil"
+	app.view.historyKey = "servidor-hostil"
 	app.mu.Unlock()
 	file := app.historyFile("servidor-hostil")
 
 	huge := strings.Repeat("<é", 40<<10) // 120 KB, com caracteres que o JSON expande
 	var biggest int64
 	for i := 0; i < 400; i++ {
-		app.saveHistory(Message{Kind: "chat", TargetMode: 2, InvokerName: strings.Repeat("N", 5000), Text: huge, Time: int64(i)})
+		app.current().saveHistory(Message{Kind: "chat", TargetMode: 2, InvokerName: strings.Repeat("N", 5000), Text: huge, Time: int64(i)})
 		if info, err := os.Stat(file); err == nil && info.Size() > biggest {
 			biggest = info.Size()
 		}
 	}
-	app.saveHistory(Message{Kind: "chat", TargetMode: 2, InvokerName: "Leko", Text: "a última", Time: 999})
+	app.current().saveHistory(Message{Kind: "chat", TargetMode: 2, InvokerName: "Leko", Text: "a última", Time: 999})
 
 	// o arquivo pode passar do limite por uma mensagem, que é quando ele é reduzido
 	if limit := int64(maxHistoryFile + 6*maxHistoryText + 4096); biggest > limit {
@@ -864,15 +864,15 @@ func TestChatHistoryIsBounded(t *testing.T) {
 func TestRemoteImageSettings(t *testing.T) {
 	app, _ := newTestApp(t)
 	api := app.API()
-	if st := app.buildState(); st.Images.Mode != ImagesAsk || st.Images.Trusted {
+	if st := app.current().buildState(); st.Images.Mode != ImagesAsk || st.Images.Trusted {
 		t.Fatalf("o padrão deveria ser perguntar: %+v", st.Images)
 	}
 	if err := api.SetRemoteImages("sempre"); err == nil {
 		t.Error("um modo desconhecido deveria ser recusado")
 	}
 	for _, mode := range []string{ImagesAlways, ImagesNever, ImagesAsk} {
-		if err := api.SetRemoteImages(mode); err != nil || app.buildState().Images.Mode != mode {
-			t.Errorf("modo %q: %v (ficou %q)", mode, err, app.buildState().Images.Mode)
+		if err := api.SetRemoteImages(mode); err != nil || app.current().buildState().Images.Mode != mode {
+			t.Errorf("modo %q: %v (ficou %q)", mode, err, app.current().buildState().Images.Mode)
 		}
 	}
 	if err := api.SetServerImages(true); err == nil {
@@ -915,9 +915,9 @@ func TestSafeFileNameStripsTricks(t *testing.T) {
 // não são formatadas pela interface).
 func TestMessagesAreClippedAndWelcomeIsRich(t *testing.T) {
 	app, em := newTestApp(t)
-	app.addMessage(Message{Kind: "chat", TargetMode: 2, InvokerName: strings.Repeat("N", 5000), PeerName: strings.Repeat("P", 5000), Text: strings.Repeat("é", 100000)})
-	app.client.OnWelcome("[b]Bem-vindo[/b]")
-	app.client.OnLog("info", `[b]"[img]http://x/y[/img]"[/b] conectou`)
+	app.current().addMessage(Message{Kind: "chat", TargetMode: 2, InvokerName: strings.Repeat("N", 5000), PeerName: strings.Repeat("P", 5000), Text: strings.Repeat("é", 100000)})
+	app.current().client.OnWelcome("[b]Bem-vindo[/b]")
+	app.current().client.OnLog("info", `[b]"[img]http://x/y[/img]"[/b] conectou`)
 	msgs := app.API().GetMessages()
 	if n := len(msgs); n != 3 {
 		t.Fatalf("%d mensagens", n)

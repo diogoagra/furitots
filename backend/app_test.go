@@ -21,6 +21,7 @@ type fakeEmitter struct {
 	messages []Message
 	talking  []Talking
 	pokes    int
+	lastPoke PokeDTO
 	other    map[string][]any // demais eventos, por nome
 }
 
@@ -36,6 +37,7 @@ func (f *fakeEmitter) Emit(event string, data any) {
 		f.talking = append(f.talking, v)
 	case PokeDTO:
 		f.pokes++
+		f.lastPoke = v
 	default:
 		if f.other == nil {
 			f.other = make(map[string][]any)
@@ -112,7 +114,7 @@ func TestInitialStateAndMessages(t *testing.T) {
 		t.Error("channels/clients devem ser listas vazias, não null")
 	}
 
-	app.onTextMessage(ts3.TextMessage{TargetMode: 1, Target: 0, InvokerID: 7, InvokerName: "Zé", Text: "oi"})
+	app.current().onTextMessage(ts3.TextMessage{TargetMode: 1, Target: 0, InvokerID: 7, InvokerName: "Zé", Text: "oi"})
 	app.addLog("info", "linha de log")
 	msgs := app.API().GetMessages()
 	if len(msgs) != 2 || msgs[0].ID == 0 || msgs[0].ID == msgs[1].ID {

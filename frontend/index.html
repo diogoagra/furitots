@@ -39,6 +39,8 @@
     <symbol id="i-spk-s" viewBox="0 0 16 16"><path d="M2.5 6v4h2.6L8.5 13V3L5.1 6z" fill="#fff"/><path d="M10.6 5.6a3.4 3.4 0 0 1 0 4.8" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round"/><path d="M2.5 13.5l11-11" stroke="#e0242b" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-star" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.5l-5.9 3.1 1.2-6.5L2.5 9.5l6.6-.9z"/></symbol>
     <symbol id="i-key" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M3 6h18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zm2 3v2h2V9zm4 0v2h2V9zm4 0v2h2V9zm4 0v2h2V9zM5 13v2h2v-2zm4 0v2h6v-2zm8 0v2h2v-2z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 2l8 3v6c0 5-3.4 9-8 11-4.6-2-8-6-8-11V5zm0 2.2L6 6.4V11c0 3.9 2.5 7.1 6 8.8 3.5-1.7 6-4.9 6-8.8V6.4z"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><path fill="currentColor" d="M12 3a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 11c4.4 0 8 2.2 8 5v2H4v-2c0-2.8 3.6-5 8-5z"/></symbol>
     <symbol id="i-screen" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3v2H7v-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm1 2v9h16V6z"/></symbol>
     <symbol id="i-code" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" d="M8.5 7l-5 5 5 5M15.5 7l5 5-5 5M13.6 4.5l-3.2 15"/></symbol>
     <symbol id="i-gear" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M10.3 2h3.4l.5 2.6c.6.2 1.2.5 1.7.8l2.3-1.4 2.4 2.4-1.4 2.3c.3.5.6 1.1.8 1.7l2.6.5v3.4l-2.6.5c-.2.6-.5 1.2-.8 1.7l1.4 2.3-2.4 2.4-2.3-1.4c-.5.3-1.1.6-1.7.8l-.5 2.6h-3.4l-.5-2.6c-.6-.2-1.2-.5-1.7-.8l-2.3 1.4-2.4-2.4 1.4-2.3c-.3-.5-.6-1.1-.8-1.7L2 13.7v-3.4l2.6-.5c.2-.6.5-1.2.8-1.7L4 5.8l2.4-2.4 2.3 1.4c.5-.3 1.1-.6 1.7-.8zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/></symbol>
@@ -79,6 +81,9 @@
 
   <div id="banner" class="banner" hidden></div>
 
+  <!-- Abas de servidores: aparecem com duas conexões ou mais -->
+  <div id="serverTabs" class="stabs" role="tablist" aria-label="Servidores conectados" hidden></div>
+
   <div class="main">
     <div class="top-split" id="topSplit">
       <section class="pane tree-pane" id="treePane">
@@ -118,7 +123,8 @@
   <!-- Barra de status -->
   <footer class="statusbar">
     <div class="sb-left">
-      <span id="txIndicator" class="tx" hidden><span class="tx-dot"></span>Transmitindo</span>
+      <span id="txIndicator" class="tx" hidden><span class="tx-dot"></span><span id="txText">Transmitindo</span></span>
+      <button id="micWhere" class="mic-where" type="button" hidden></button>
       <button id="whisperIndicator" class="whisper" title="Clique para parar de sussurrar" hidden></button>
       <button id="screenIndicator" class="whisper screen" title="Clique para parar de compartilhar a tela" hidden></button>
       <span id="mockBadge" class="mock-badge" hidden>modo demonstração</span>
@@ -238,6 +244,7 @@
       <span class="dlg-error" id="connectError"></span>
     </div>
     <div class="dlg-foot">
+      <label class="check foot-opt" id="cNewTabRow" hidden><input type="checkbox" id="cNewTab"> Em nova aba</label>
       <button class="btn" id="connectCancel" type="button">Cancelar</button>
       <button class="btn primary" id="connectOk" type="submit" form="connectForm">Conectar</button>
     </div>
@@ -259,52 +266,97 @@
   </div>
 </div>
 
-<!-- Diálogo: ajustes -->
+<!-- Diálogo: ajustes (uma aba por assunto) -->
 <div class="modal" id="dlgSettings" hidden>
-  <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="dlgSettingsTitle">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlgSettingsTitle">
     <div class="dlg-title" id="dlgSettingsTitle">Ajustes</div>
+    <div class="set-tabs" id="setTabs" role="tablist" aria-label="Seções dos ajustes">
+      <button type="button" class="set-tab" role="tab" id="setTab-audio" data-pane="audio" aria-controls="setPane-audio"><svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg><span>Áudio</span></button>
+      <button type="button" class="set-tab" role="tab" id="setTab-hotkeys" data-pane="hotkeys" aria-controls="setPane-hotkeys"><svg class="ic" aria-hidden="true"><use href="#i-key"/></svg><span>Atalhos</span></button>
+      <button type="button" class="set-tab" role="tab" id="setTab-connection" data-pane="connection" aria-controls="setPane-connection"><svg class="ic" aria-hidden="true"><use href="#i-plug"/></svg><span>Conexão</span></button>
+      <button type="button" class="set-tab" role="tab" id="setTab-privacy" data-pane="privacy" aria-controls="setPane-privacy"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span>Privacidade</span></button>
+      <button type="button" class="set-tab" role="tab" id="setTab-screen" data-pane="screen" aria-controls="setPane-screen"><svg class="ic" aria-hidden="true"><use href="#i-screen"/></svg><span>Tela</span></button>
+      <button type="button" class="set-tab" role="tab" id="setTab-identities" data-pane="identities" aria-controls="setPane-identities"><svg class="ic" aria-hidden="true"><use href="#i-user"/></svg><span>Identidades</span></button>
+    </div>
     <div class="dlg-content settings">
-      <div class="set-col">
+
+      <section class="set-pane" id="setPane-audio" role="tabpanel" aria-labelledby="setTab-audio" data-pane="audio">
         <div class="set-sec">
-          <div class="set-title">Áudio</div>
+          <div class="set-title">Dispositivos</div>
           <div class="set-grid">
             <label for="setIn">Microfone:</label><select id="setIn"></select>
             <label for="setOut">Alto-falantes:</label><select id="setOut"></select>
           </div>
-          <div class="muted-text small" id="setDevNote">Com o cancelamento de eco ligado, o macOS usa sempre os dispositivos padrão do sistema.</div>
+          <div class="set-hint" id="setDevNote">Com o cancelamento de eco ligado, o macOS usa sempre os dispositivos padrão do sistema.</div>
         </div>
         <div class="set-sec">
-          <div class="set-title">Transmissão</div>
+          <div class="set-title">Quando transmitir</div>
           <label class="check"><input type="radio" name="vadModeS" value="auto"> Detecção de voz <span class="muted-text small">(ignora teclado e ruído)</span></label>
           <label class="check"><input type="radio" name="vadModeS" value="level"> Por volume <span class="muted-text small">(limiar no painel do microfone)</span></label>
-          <label class="check"><input type="radio" name="vadModeS" value="ptt"> Apertar para falar</label>
+          <label class="check"><input type="radio" name="vadModeS" value="ptt"> Apertar para falar <span class="muted-text small">(o atalho fica na aba Atalhos)</span></label>
         </div>
         <div class="set-sec">
-          <div class="set-title">Atalhos</div>
-          <div class="hk-rows" id="hkRows"></div>
-          <div class="muted-text small" id="hkNote" hidden>Neste sistema os atalhos só funcionam com a janela do app em foco.</div>
+          <div class="set-title">Tratamento do som</div>
+          <div class="set-hint">A supressão de ruído, a sensibilidade da detecção de voz, o cancelamento de eco, o volume das outras vozes e os avisos sonoros ficam no painel do microfone, que também tem o medidor para testar.</div>
+          <div class="set-row wrap"><button class="btn" id="setOpenCapture" type="button">Abrir o painel do microfone</button></div>
         </div>
-      </div>
-      <div class="set-col">
+      </section>
+
+      <section class="set-pane" id="setPane-hotkeys" role="tabpanel" aria-labelledby="setTab-hotkeys" data-pane="hotkeys" hidden>
+        <div class="set-sec">
+          <div class="set-title">Atalhos de teclado</div>
+          <div class="set-hint">Funcionam com o app em segundo plano. Use uma tecla de função ou uma combinação com Ctrl, Alt ou Cmd.</div>
+          <div class="hk-rows" id="hkRows"></div>
+          <div class="set-hint" id="hkNote" hidden>Neste sistema os atalhos só funcionam com a janela do app em foco.</div>
+          <div class="set-hint">O atalho de cada som é definido no próprio soundboard, no botão de teclado do som.</div>
+        </div>
+      </section>
+
+      <section class="set-pane" id="setPane-connection" role="tabpanel" aria-labelledby="setTab-connection" data-pane="connection" hidden>
+        <div class="set-sec">
+          <div class="set-title">Apelido</div>
+          <div class="set-grid">
+            <label for="setNick">Apelido:</label>
+            <div class="set-row"><input type="text" id="setNick" maxlength="30" spellcheck="false"><button class="btn" id="setNickApply" type="button">Aplicar</button></div>
+          </div>
+          <div class="set-hint">Vale para o servidor desta aba, agora, e para as próximas conexões.</div>
+        </div>
         <div class="set-sec">
           <div class="set-title">Conexão</div>
           <label class="check"><input type="checkbox" id="setReconnect"> Reconectar automaticamente se a conexão cair</label>
           <label class="check" title="Desmarcado: a cutucada só toca o aviso sonoro e aparece no registro do servidor."><input type="checkbox" id="setPokePopup"> Abrir uma janela quando alguém me cutucar</label>
+        </div>
+        <div class="set-sec">
+          <div class="set-title">Chave de privilégio</div>
+          <div class="set-hint">Uma chave dada por quem administra o servidor põe a sua identidade num grupo dele. Vale para o servidor desta aba.</div>
+          <div class="set-row wrap"><button class="btn" id="setPrivKey" type="button">Usar chave de privilégio…</button></div>
+        </div>
+      </section>
+
+      <section class="set-pane" id="setPane-privacy" role="tabpanel" aria-labelledby="setTab-privacy" data-pane="privacy" hidden>
+        <div class="set-sec">
+          <div class="set-title">Imagens de fora</div>
+          <div class="set-hint">Imagens em descrições de canais e de pessoas, na mensagem de boas-vindas e no banner do servidor. Buscar uma imagem mostra o seu endereço IP a quem a hospeda.</div>
           <div class="set-grid">
-            <label for="setImages" title="Imagens em descrições de canais e de pessoas, na mensagem de boas-vindas e o banner do servidor. Buscar uma imagem mostra o seu endereço IP a quem a hospeda.">Imagens de fora:</label>
+            <label for="setImages">Carregar:</label>
             <select id="setImages">
               <option value="ask">Só quando eu clicar (ou sempre, nos servidores que eu escolher)</option>
               <option value="always">Carregar sempre</option>
               <option value="never">Nunca carregar</option>
             </select>
           </div>
-          <div class="set-grid">
-            <label for="setNick">Apelido:</label>
-            <div class="set-row"><input type="text" id="setNick" maxlength="30" spellcheck="false"><button class="btn" id="setNickApply" type="button">Aplicar</button></div>
-          </div>
         </div>
         <div class="set-sec">
+          <div class="set-title">Histórico de conversas</div>
+          <div class="set-hint">As conversas de canal e de servidor ficam guardadas neste computador, separadas por servidor. As conversas privadas não são guardadas.</div>
+          <div class="set-row wrap"><button class="btn" id="setClearHistory" type="button">Apagar histórico de conversas</button></div>
+        </div>
+      </section>
+
+      <section class="set-pane" id="setPane-screen" role="tabpanel" aria-labelledby="setTab-screen" data-pane="screen" hidden>
+        <div class="set-sec">
           <div class="set-title">Compartilhamento de tela</div>
+          <div class="set-hint">O vídeo vai direto do seu computador ao de quem assiste, e por isso cada lado vê o endereço IP do outro. Com um servidor de retransmissão (TURN) dá para esconder o seu.</div>
           <div class="set-grid">
             <label for="setStun" title="Descobre o endereço público de cada lado para o vídeo ir direto de um computador ao outro. Vazio = o padrão; “none” = nenhum (só funciona na mesma rede).">Servidor STUN:</label>
             <input type="text" id="setStun" spellcheck="false" placeholder="padrão: stun.l.google.com">
@@ -316,15 +368,13 @@
           <label class="check"><input type="checkbox" id="setRelayOnly"> Esconder meu IP: mandar o vídeo só pela retransmissão</label>
           <div class="set-row wrap"><button class="btn" id="setScreenSave" type="button">Salvar</button></div>
         </div>
+      </section>
+
+      <section class="set-pane" id="setPane-identities" role="tabpanel" aria-labelledby="setTab-identities" data-pane="identities" hidden>
         <div class="set-sec">
           <div class="set-title">Identidades</div>
+          <div class="set-hint">A identidade é quem você é para um servidor: é por ela que ele guarda os seus grupos e permissões.</div>
           <div class="list-box id-list" id="setIdList"></div>
-          <div class="set-grid">
-            <span>UID:</span><span id="setUid" class="sel">—</span>
-            <span id="setSrvUidLbl" hidden title="Servidores TeamSpeak 6 identificam você por um código mais longo, calculado a partir da mesma identidade.">Neste servidor:</span><span id="setSrvUid" class="sel" hidden></span>
-            <span>Nível de segurança:</span>
-            <div class="set-row"><b id="setLevel">—</b><button class="btn" id="setImprove" type="button">Aumentar…</button></div>
-          </div>
           <div class="set-row wrap">
             <button class="btn" id="setIdNew" type="button">Nova…</button>
             <button class="btn" id="setImport" type="button">Importar…</button>
@@ -333,15 +383,18 @@
             <button class="btn" id="setExport" type="button">Exportar…</button>
             <button class="btn" id="setIdDelete" type="button">Apagar</button>
           </div>
-          <div class="set-row wrap">
-            <button class="btn" id="setPrivKey" type="button">Usar chave de privilégio…</button>
-          </div>
         </div>
         <div class="set-sec">
-          <div class="set-title">Histórico</div>
-          <button class="btn" id="setClearHistory" type="button">Apagar histórico de conversas</button>
+          <div class="set-title">Identidade selecionada</div>
+          <div class="set-grid">
+            <span>UID:</span><span id="setUid" class="sel">—</span>
+            <span id="setSrvUidLbl" hidden title="Servidores TeamSpeak 6 identificam você por um código mais longo, calculado a partir da mesma identidade.">Neste servidor:</span><span id="setSrvUid" class="sel" hidden></span>
+            <span>Nível de segurança:</span>
+            <div class="set-row"><b id="setLevel">—</b><button class="btn" id="setImprove" type="button">Aumentar…</button></div>
+          </div>
         </div>
-      </div>
+      </section>
+
     </div>
     <div class="dlg-status">
       <span class="spinner" id="setSpinner" hidden></span>

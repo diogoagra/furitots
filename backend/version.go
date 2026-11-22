@@ -11,8 +11,9 @@ import "strings"
 // client_meta_data, que todos os clientes recebem. Clientes oficiais continuam
 // mostrando a versão assinada.
 const (
-	AppVersion = "1.0.1"
-	AppVendor  = "Diogo Agra"            // autor; aparece depois da versão
+	AppName    = "Furito TS" // nome do app; aparece antes da versão
+	AppVersion = "1.1.0"
+	AppVendor  = "Diogo Agra"            // autor; aparece na janela Sobre
 	AppSite    = "https://diogoagra.dev" // site do autor
 
 	furitoMetaPrefix = "furito/"

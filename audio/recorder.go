@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-// Gravação da conversa: as vozes que chegam e o que nós transmitimos (já com
-// o tratamento do microfone, a voz modificada e o soundboard), somados num
-// arquivo WAV mono de 48 kHz. Avisos sonoros e o teste de microfone ficam de
-// fora.
+// Gravação da conversa de uma conexão: as vozes que chegam por ela e o que nós
+// transmitimos para ela (já com o tratamento do microfone, a voz modificada e
+// o soundboard), somados num arquivo WAV mono de 48 kHz. Avisos sonoros, o
+// teste de microfone e as vozes das outras conexões ficam de fora.
 //
 // O relógio da gravação é o da saída de áudio: a cada bloco tocado entra o
 // mesmo tanto de gravação. O que transmitimos chega por outro relógio (o do
@@ -30,6 +30,7 @@ const (
 
 type recorder struct {
 	path    string
+	conn    uint32 // a conexão gravada
 	started time.Time
 	blocks  chan []int16
 	done    chan struct{}
@@ -97,9 +98,10 @@ func (r *recorder) write(f *os.File) {
 	fail(f.Close())
 }
 
-// StartRecording começa a gravar a conversa no arquivo path (WAV), que não
-// pode existir ainda.
-func (e *Engine) StartRecording(path string) error {
+// StartRecording começa a gravar a conversa da conexão conn no arquivo path
+// (WAV), que não pode existir ainda. A nossa voz só entra enquanto a
+// transmissão estiver nessa conexão (SetTxConn).
+func (e *Engine) StartRecording(path string, conn uint32) error {
 	e.recMu.Lock()
 	defer e.recMu.Unlock()
 	if e.rec != nil {
@@ -111,6 +113,7 @@ func (e *Engine) StartRecording(path string) error {
 	}
 	r := &recorder{
 		path:    path,
+		conn:    conn,
 		started: time.Now(),
 		blocks:  make(chan []int16, recQueueBlocks),
 		done:    make(chan struct{}),
@@ -151,13 +154,23 @@ func (e *Engine) RecordingSince() time.Time {
 	return e.rec.started
 }
 
-// recordPlayback recebe a soma das vozes de um bloco que está sendo tocado e
-// grava esse bloco junto com o que transmitimos no mesmo período. É chamado no
-// relógio da saída de áudio e não altera voices.
-func (e *Engine) recordPlayback(voices []float64) {
+// recordingConn diz se há gravação em andamento e de qual conexão.
+func (e *Engine) recordingConn() (conn uint32, recording bool) {
 	e.recMu.Lock()
 	defer e.recMu.Unlock()
 	if e.rec == nil {
+		return 0, false
+	}
+	return e.rec.conn, true
+}
+
+// recordPlayback recebe a soma das vozes da conexão conn num bloco que está
+// sendo tocado e grava esse bloco junto com o que transmitimos no mesmo
+// período. É chamado no relógio da saída de áudio e não altera voices.
+func (e *Engine) recordPlayback(voices []float64, conn uint32) {
+	e.recMu.Lock()
+	defer e.recMu.Unlock()
+	if e.rec == nil || e.rec.conn != conn {
 		return
 	}
 	buf := make([]float64, len(voices))
@@ -179,12 +192,12 @@ func (e *Engine) recordPlayback(voices []float64) {
 	}
 }
 
-// recordTx guarda um quadro que acabamos de transmitir, para entrar na
-// gravação no próximo bloco tocado.
-func (e *Engine) recordTx(sent []float64) {
+// recordTx guarda um quadro que acabamos de transmitir para a conexão conn,
+// para entrar na gravação (se for a dela) no próximo bloco tocado.
+func (e *Engine) recordTx(sent []float64, conn uint32) {
 	e.recMu.Lock()
 	defer e.recMu.Unlock()
-	if e.rec == nil {
+	if e.rec == nil || e.rec.conn != conn {
 		return
 	}
 	if over := len(e.recTx) + len(sent) - recMaxTx; over > 0 {

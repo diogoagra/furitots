@@ -6,7 +6,15 @@
  * os workers, entrega a eles os eventos do backend ("script:event") e repassa
  * ao backend o que eles pedem (ScriptCall), onde cada pedido é conferido.
  *
- * Uso:  FuritoScripts.init({ call, on, notify })   call(nome, ...args) → Promise; on(evento, cb); notify(nível, texto)
+ * Com vários servidores abertos (um por aba), cada script roda uma vez para
+ * cada servidor: uma instância (um worker) por aba. Assim, dentro do script,
+ * "ts" é sempre o servidor daquela instância — os eventos, as consultas, as
+ * ações e também os temporizadores —, e o que ele guarda em variáveis não se
+ * mistura entre servidores.
+ *
+ * Uso:  FuritoScripts.init({ call, forTab, on, notify })   call(nome, ...args) → Promise; forTab(aba) → API daquela aba;
+ *                                                          on(evento, cb); notify(nível, texto)
+ *       FuritoScripts.setTabs([{ id, name }])   as abas abertas (a interface chama a cada mudança)
  *       FuritoScripts.list() / save(def) / remove(id) / setEnabled(id, ligado) / restart(id)
  *       FuritoScripts.onChange(cb)   avisa quando a lista, um estado ou um registro muda
  */
@@ -19,7 +27,10 @@
   const NOTIFY_GAP = 15000;  // no máximo um erro por script no registro do servidor nesse intervalo
 
   let deps = null;
-  const entries = new Map(); // id → { def, worker, status, error, log, lastPong, lastNotify }
+  const entries = new Map(); // id → { def, status, error, log, lastNotify, inst: Map(aba → instância) }
+  // instância: { tab, worker, started, lastPong, pending } — o script rodando para um servidor
+  const tabNames = new Map([[0, '']]); // as abas em que os scripts rodam: aba → nome do servidor
+  let tabsKnown = false;               // até a interface dizer quais abas existem (setTabs), há só "a aba atual" (0)
   const listeners = new Set();
   let lastTick = 0;
 
@@ -36,7 +47,14 @@
     }, 0);
   }
 
-  function addLog(entry, level, text) {
+  // callTab chama o backend em nome da instância de uma aba.
+  function callTab(tab, name, ...args) {
+    return deps.forTab ? Promise.resolve(deps.forTab(tab)[name](...args)) : deps.call(name, ...args);
+  }
+
+  // Com mais de um servidor aberto, cada linha do registro diz de qual veio.
+  function addLog(entry, level, text, inst) {
+    if (inst && tabNames.size > 1) text = '[' + (tabNames.get(inst.tab) || 'aba ' + inst.tab) + '] ' + text;
     const last = entry.log[entry.log.length - 1];
     if (last && last.level === level && last.text === text) { last.count++; last.time = Date.now(); }
     else {
@@ -54,34 +72,49 @@
     if (deps.notify) deps.notify('error', 'Script "' + entry.def.name + '": ' + text);
   }
 
-  function stop(entry) {
-    if (entry.worker) { try { entry.worker.terminate(); } catch (e) { /* já encerrado */ } }
-    entry.worker = null;
+  function stopInstance(entry, tab) {
+    const inst = entry.inst.get(tab);
+    if (!inst) return;
+    entry.inst.delete(tab);
+    try { inst.worker.terminate(); } catch (e) { /* já encerrado */ }
   }
 
-  function halt(entry, text) {
+  function stop(entry) {
+    Array.from(entry.inst.keys()).forEach((tab) => stopInstance(entry, tab));
+  }
+
+  // Um erro que impede o script de rodar para o script inteiro, em todos os
+  // servidores: o código é o mesmo em todas as instâncias.
+  function halt(entry, text, inst) {
     stop(entry);
     entry.status = 'error';
     entry.error = text;
-    addLog(entry, 'error', text);
+    addLog(entry, 'error', text, inst);
     notifyError(entry, text);
+  }
+
+  function startInstance(entry, tab) {
+    let w;
+    try { w = new Worker('script-worker.js'); } catch (e) { halt(entry, 'não foi possível iniciar o script: ' + errText(e)); return; }
+    const inst = { tab, worker: w, started: false, lastPong: Date.now(), pending: 0 };
+    entry.inst.set(tab, inst);
+    w.addEventListener('message', (e) => { if (entry.inst.get(inst.tab) === inst) onMessage(entry, inst, e.data || {}); });
+    w.addEventListener('error', (e) => {
+      if (entry.inst.get(inst.tab) !== inst) return;
+      if (e.preventDefault) e.preventDefault();
+      halt(entry, 'não foi possível iniciar o script' + (e.message ? ': ' + e.message : ''), inst);
+    });
   }
 
   function start(entry) {
     stop(entry);
     entry.error = '';
     if (!entry.def.enabled) { entry.status = 'off'; changed(); return; }
-    let w;
-    try { w = new Worker('script-worker.js'); } catch (e) { halt(entry, 'não foi possível iniciar o script: ' + errText(e)); return; }
-    entry.worker = w;
     entry.status = 'starting';
-    entry.lastPong = Date.now();
-    w.addEventListener('message', (e) => { if (entry.worker === w) onMessage(entry, w, e.data || {}); });
-    w.addEventListener('error', (e) => {
-      if (entry.worker !== w) return;
-      if (e.preventDefault) e.preventDefault();
-      halt(entry, 'não foi possível iniciar o script' + (e.message ? ': ' + e.message : ''));
-    });
+    for (const tab of tabNames.keys()) {
+      startInstance(entry, tab);
+      if (entry.status === 'error') return; // não deu para criar o worker
+    }
     changed();
   }
 
@@ -110,39 +143,43 @@
     return true;
   }
 
-  function onMessage(entry, w, m) {
+  function onMessage(entry, inst, m) {
     if (!m || typeof m !== 'object') return;
+    const w = inst.worker;
+    const mine = () => entry.inst.get(inst.tab) === inst;
     switch (m.t) {
       case 'ready':
         w.postMessage({ t: 'init', code: entry.def.code });
         break;
       case 'started':
-        entry.status = 'running';
-        addLog(entry, 'info', 'script iniciado');
+        inst.started = true;
+        if (entry.status === 'starting' && Array.from(entry.inst.values()).every((x) => x.started)) entry.status = 'running';
+        addLog(entry, 'info', 'script iniciado', inst);
         break;
       case 'call': {
-        const reply = (msg) => { if (entry.worker === w) w.postMessage(Object.assign({ t: 'result', n: m.n }, msg)); };
+        const reply = (msg) => { if (mine()) w.postMessage(Object.assign({ t: 'result', n: m.n }, msg)); };
         let args = m.args, size = 0;
         if (args == null) args = {};
         try { size = JSON.stringify(args).length; } catch (e) { size = Infinity; }
         if (typeof args !== 'object' || Array.isArray(args) || size > MAX_ARGS) { reply({ ok: false, error: 'argumentos inválidos ou grandes demais' }); break; }
-        if ((entry.pending || 0) >= MAX_PENDING) { reply({ ok: false, error: 'muitas chamadas ao mesmo tempo' }); break; }
-        entry.pending = (entry.pending || 0) + 1;
-        const done = () => { entry.pending = Math.max(0, (entry.pending || 1) - 1); };
-        deps.call('ScriptCall', entry.def.id, String(m.action).slice(0, 64), args).then(
+        if (inst.pending >= MAX_PENDING) { reply({ ok: false, error: 'muitas chamadas ao mesmo tempo' }); break; }
+        inst.pending++;
+        const done = () => { inst.pending = Math.max(0, inst.pending - 1); };
+        // o pedido vai para o servidor desta instância, esteja a aba dele à vista ou não
+        callTab(inst.tab, 'ScriptCall', entry.def.id, String(m.action).slice(0, 64), args).then(
           (value) => { done(); reply({ ok: true, value: value === undefined ? null : value }); },
           (err) => { done(); reply({ ok: false, error: errText(err) }); });
         break;
       }
       case 'log':
-        if (allowLine(entry)) addLog(entry, m.level === 'warn' || m.level === 'error' ? m.level : 'info', clip(m.text));
+        if (allowLine(entry)) addLog(entry, m.level === 'warn' || m.level === 'error' ? m.level : 'info', clip(m.text), inst);
         break;
       case 'error':
-        if (m.fatal) halt(entry, clip(m.text)); // não chegou a rodar (ou parou logo no começo)
-        else if (allowLine(entry)) { addLog(entry, 'error', clip(m.text)); notifyError(entry, clip(m.text)); }
+        if (m.fatal) halt(entry, clip(m.text), inst); // não chegou a rodar (ou parou logo no começo)
+        else if (allowLine(entry)) { addLog(entry, 'error', clip(m.text), inst); notifyError(entry, clip(m.text)); }
         break;
       case 'pong':
-        entry.lastPong = Date.now();
+        inst.lastPong = Date.now();
         break;
       default: break;
     }
@@ -154,22 +191,61 @@
     const late = lastTick && now - lastTick > PING_MS * 2; // o computador dormiu ou a janela ficou parada: não é culpa do script
     lastTick = now;
     entries.forEach((entry) => {
-      if (!entry.worker) return;
-      if (late) entry.lastPong = now;
-      else if (now - entry.lastPong > HUNG_MS) { halt(entry, 'o script parou de responder (laço sem fim?) e foi encerrado'); return; }
-      entry.worker.postMessage({ t: 'ping' });
+      for (const inst of Array.from(entry.inst.values())) {
+        if (late) inst.lastPong = now;
+        else if (now - inst.lastPong > HUNG_MS) { halt(entry, 'o script parou de responder (laço sem fim?) e foi encerrado', inst); return; }
+        inst.worker.postMessage({ t: 'ping' });
+      }
     });
   }
 
+  // Cada evento vai só para as instâncias do servidor em que aconteceu.
   function dispatch(event) {
+    if (!event) return;
+    const tab = Number(event.tab) || 0;
+    const ev = Object.assign({}, event);
+    delete ev.tab; // o número da aba é coisa da interface, não do script
     entries.forEach((entry) => {
-      if (entry.worker && entry.status === 'running') entry.worker.postMessage({ t: 'event', event });
+      const inst = entry.inst.get(tab) || (tabsKnown ? null : entry.inst.get(0));
+      if (inst && inst.started && entry.status !== 'error') inst.worker.postMessage({ t: 'event', event: ev });
+    });
+  }
+
+  // setTabs diz em que servidores (abas) os scripts rodam. Aba nova: os scripts
+  // ligados ganham uma instância para ela. Aba fechada: as instâncias dela são
+  // encerradas. As outras não são tocadas.
+  function setTabs(list) {
+    const next = new Map();
+    (Array.isArray(list) ? list : []).forEach((t) => { const id = Number(t && t.id) || 0; if (id) next.set(id, String((t && t.name) || '')); });
+    if (!next.size) return;
+    if (!tabsKnown) {
+      // Até aqui os scripts rodavam para "a aba atual" (0), que é a primeira
+      // aba: a instância continua a mesma, só passa a ter o número dela.
+      tabsKnown = true;
+      const first = next.keys().next().value;
+      entries.forEach((entry) => {
+        const inst = entry.inst.get(0);
+        if (inst) { entry.inst.delete(0); inst.tab = first; entry.inst.set(first, inst); }
+      });
+      tabNames.delete(0);
+      tabNames.set(first, next.get(first));
+    }
+    for (const tab of Array.from(tabNames.keys())) {
+      if (next.has(tab)) continue;
+      tabNames.delete(tab);
+      entries.forEach((entry) => stopInstance(entry, tab));
+    }
+    next.forEach((name, tab) => {
+      const isNew = !tabNames.has(tab);
+      tabNames.set(tab, name);
+      if (!isNew) return;
+      entries.forEach((entry) => { if (entry.def.enabled && entry.status !== 'error' && entry.status !== 'off') startInstance(entry, tab); });
     });
   }
 
   function adopt(def) {
     let entry = entries.get(def.id);
-    if (!entry) { entry = { def, worker: null, status: 'off', error: '', log: [], lastPong: 0, lastNotify: 0 }; entries.set(def.id, entry); }
+    if (!entry) { entry = { def, status: 'off', error: '', log: [], lastNotify: 0, inst: new Map() }; entries.set(def.id, entry); }
     entry.def = def;
     return entry;
   }
@@ -345,6 +421,9 @@
       changed();
     },
 
+    setTabs,
+    // instances: em quantos servidores o script está rodando agora (para os testes e a interface).
+    instances: (id) => { const e = entries.get(id); return e ? Array.from(e.inst.keys()) : []; },
     list: () => Array.from(entries.values()).map(view),
     get: (id) => { const e = entries.get(id); return e ? view(e) : null; },
     logOf: (id) => { const e = entries.get(id); return e ? e.log : []; },

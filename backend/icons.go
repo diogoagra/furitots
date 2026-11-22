@@ -119,44 +119,45 @@ func clientIcons(cl ts3.ClientInfo, snap ts3.Snapshot) []IconRef {
 // icon devolve a imagem de um ícone do servidor como data URL. Ícones são
 // identificados pelo CRC32 do conteúdo, então nunca mudam: ficam guardados em
 // disco e não são baixados de novo.
-func (a *App) icon(id uint32) (string, error) {
+func (c *conn) icon(id uint32) (string, error) {
 	if id == 0 {
 		return "", errors.New("sem ícone")
 	}
-	a.iconMu.Lock()
-	if url, ok := a.icons[id]; ok {
-		a.iconMu.Unlock()
-		if url == "" {
-			return "", errors.New("ícone indisponível")
-		}
+	c.app.iconMu.Lock()
+	if url := c.app.icons[id]; url != "" {
+		c.app.iconMu.Unlock()
 		return url, nil
 	}
-	if wait, busy := a.iconWait[id]; busy {
-		a.iconMu.Unlock()
+	if c.iconFailed[id] {
+		c.app.iconMu.Unlock()
+		return "", errors.New("ícone indisponível")
+	}
+	if wait, busy := c.app.iconWait[id]; busy {
+		c.app.iconMu.Unlock()
 		<-wait // outro pedido já está baixando este ícone
-		a.iconMu.Lock()
-		url := a.icons[id]
-		a.iconMu.Unlock()
+		c.app.iconMu.Lock()
+		url := c.app.icons[id]
+		c.app.iconMu.Unlock()
 		if url == "" {
 			return "", errors.New("ícone indisponível")
 		}
 		return url, nil
 	}
 	wait := make(chan struct{})
-	a.iconWait[id] = wait
-	a.iconMu.Unlock()
+	c.app.iconWait[id] = wait
+	c.app.iconMu.Unlock()
 
-	file := filepath.Join(a.iconDir, strconv.FormatUint(uint64(id), 10))
+	file := filepath.Join(c.app.iconDir, strconv.FormatUint(uint64(id), 10))
 	data, err := os.ReadFile(file)
 	fromDisk := err == nil
 	if !fromDisk {
-		data, err = a.client.DownloadIcon(id)
+		data, err = c.client.DownloadIcon(id)
 	}
 	url := ""
 	if err == nil {
 		if mime := sniffImage(data); mime != "" {
 			url = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
-			if !fromDisk && os.MkdirAll(a.iconDir, 0o700) == nil {
+			if !fromDisk && os.MkdirAll(c.app.iconDir, 0o700) == nil {
 				os.WriteFile(file, data, 0o600)
 			}
 		} else {
@@ -164,33 +165,27 @@ func (a *App) icon(id uint32) (string, error) {
 		}
 	}
 
-	a.iconMu.Lock()
-	// Só a falha definitiva (o ícone não existe ou não é imagem) fica
-	// lembrada, e só até a próxima conexão; falha passageira é tentada de
-	// novo no próximo pedido.
-	if url != "" || !ts3.IsTransient(err) {
-		a.icons[id] = url
+	c.app.iconMu.Lock()
+	// Só a falha definitiva (o ícone não existe neste servidor ou não é
+	// imagem) fica lembrada, e só até a próxima conexão; falha passageira é
+	// tentada de novo no próximo pedido.
+	if url != "" {
+		c.app.icons[id] = url
+	} else if !ts3.IsTransient(err) {
+		c.iconFailed[id] = true
 	}
-	delete(a.iconWait, id)
-	a.iconMu.Unlock()
+	delete(c.app.iconWait, id)
+	c.app.iconMu.Unlock()
 	close(wait)
 	return url, err
 }
 
 // forgetFailedIcons permite tentar de novo os ícones e avatares que falharam.
-func (a *App) forgetFailedIcons() {
-	a.iconMu.Lock()
-	for id, url := range a.icons {
-		if url == "" {
-			delete(a.icons, id)
-		}
-	}
-	for key, url := range a.avatars {
-		if url == "" {
-			delete(a.avatars, key)
-		}
-	}
-	a.iconMu.Unlock()
+func (c *conn) forgetFailedIcons() {
+	c.app.iconMu.Lock()
+	c.iconFailed = make(map[uint32]bool)
+	c.avatarFailed = make(map[string]bool)
+	c.app.iconMu.Unlock()
 }
 
 var avatarFlag = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -199,9 +194,9 @@ var avatarFlag = regexp.MustCompile(`^[0-9a-f]{32}$`)
 // um cliente tem avatar por uma marca — o MD5 do arquivo —, que muda quando
 // o avatar muda: por ela a imagem fica guardada em disco (avatars/) e não é
 // baixada de novo.
-func (a *App) avatar(clientID int) (string, error) {
+func (c *conn) avatar(clientID int) (string, error) {
 	var cl ts3.ClientInfo
-	for _, c := range a.client.Snapshot().Clients {
+	for _, c := range c.client.Snapshot().Clients {
 		if int(c.ID) == clientID {
 			cl = c
 		}
@@ -213,20 +208,20 @@ func (a *App) avatar(clientID int) (string, error) {
 		return "", errors.New("este cliente não tem avatar")
 	}
 	key := cl.UID + "\x00" + cl.Avatar
-	a.iconMu.Lock()
-	url, known := a.avatars[key]
-	a.iconMu.Unlock()
-	if known {
-		if url == "" {
-			return "", errors.New("avatar indisponível")
-		}
+	c.app.iconMu.Lock()
+	url, failed := c.app.avatars[key], c.avatarFailed[key]
+	c.app.iconMu.Unlock()
+	if url != "" {
 		return url, nil
+	}
+	if failed {
+		return "", errors.New("avatar indisponível")
 	}
 
 	// só uma marca que é mesmo um MD5 vira nome de arquivo
 	file := ""
 	if avatarFlag.MatchString(cl.Avatar) {
-		file = filepath.Join(a.avatarDir, cl.Avatar)
+		file = filepath.Join(c.app.avatarDir, cl.Avatar)
 	}
 	var data []byte
 	var err error = os.ErrNotExist
@@ -235,25 +230,27 @@ func (a *App) avatar(clientID int) (string, error) {
 	}
 	fromDisk := err == nil
 	if !fromDisk {
-		data, err = a.client.DownloadAvatar(cl.UID)
+		data, err = c.client.DownloadAvatar(cl.UID)
 	}
 	url = ""
 	if err == nil {
 		if mime := sniffImage(data); mime != "" {
 			url = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
 			// guarda em disco só o que confere com a marca (senão o nome mentiria sobre o conteúdo)
-			if sum := md5.Sum(data); !fromDisk && file != "" && hex.EncodeToString(sum[:]) == cl.Avatar && os.MkdirAll(a.avatarDir, 0o700) == nil {
+			if sum := md5.Sum(data); !fromDisk && file != "" && hex.EncodeToString(sum[:]) == cl.Avatar && os.MkdirAll(c.app.avatarDir, 0o700) == nil {
 				os.WriteFile(file, data, 0o600)
 			}
 		} else {
 			err = errors.New("o arquivo do avatar não é uma imagem")
 		}
 	}
-	a.iconMu.Lock()
+	c.app.iconMu.Lock()
 	// como nos ícones: só a falha definitiva fica lembrada, e só até a próxima conexão
-	if url != "" || !ts3.IsTransient(err) {
-		a.avatars[key] = url
+	if url != "" {
+		c.app.avatars[key] = url
+	} else if !ts3.IsTransient(err) {
+		c.avatarFailed[key] = true
 	}
-	a.iconMu.Unlock()
+	c.app.iconMu.Unlock()
 	return url, err
 }

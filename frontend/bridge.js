@@ -1,11 +1,15 @@
 /*
  * bridge.js — ponte entre a UI e o backend Go (Wails v2).
  *
- * Real:  window.go.backend.API.<Método>()  +  window.runtime.EventsOn(nome, cb)
+ * Real:  window.go.backend.Bridge.Call(aba, método, argumentos)  +  window.runtime.EventsOn(nome, cb)
  * Mock:  usado quando a página é aberta num navegador comum (sem Wails) ou com ?mock na URL.
  *
  * Uso:  const bridge = await window.FuritoBridge.init();
  *       bridge.api.Connect({...});  bridge.on('state', cb);  bridge.openURL(url);
+ *
+ * Cada servidor conectado é uma aba. bridge.api age na aba em bridge.tab (0 = a
+ * que está à vista); bridge.forTab(id) devolve a API presa a uma aba, para o
+ * que continua valendo depois que a pessoa troca de aba.
  */
 (function () {
   'use strict';
@@ -19,7 +23,18 @@
   }
 
   function findApi() {
-    return (window.go && window.go.backend && window.go.backend.API) || null;
+    return (window.go && window.go.backend && window.go.backend.Bridge) || null;
+  }
+
+  // apiFor devolve um objeto com os métodos da API: cada chamada vira
+  // Bridge.Call(aba, nome, argumentos). tab() diz a aba na hora da chamada.
+  function apiFor(root, tab) {
+    return new Proxy({}, {
+      get(_, name) {
+        if (typeof name !== 'string' || name === 'then') return undefined; // não é uma Promise
+        return (...args) => root.Call(tab(), name, args);
+      },
+    });
   }
 
   function waitForApi(timeoutMs) {
@@ -41,19 +56,24 @@
 
   async function init() {
     if (!forceMock) {
-      const api = await waitForApi(inWails() ? 5000 : 0);
-      if (api) {
-        return {
+      const root = await waitForApi(inWails() ? 5000 : 0);
+      if (root) {
+        const bridge = {
           isMock: false,
           missingBackend: false,
-          api,
+          tab: 0,
+          forTab: (id) => apiFor(root, () => id),
           on(name, cb) { window.runtime.EventsOn(name, cb); },
           openURL: openExternal,
         };
+        bridge.api = apiFor(root, () => bridge.tab);
+        return bridge;
       }
     }
     const mock = createMock(params);
-    return { isMock: true, missingBackend: !forceMock && inWails(), api: mock.api, on: mock.on, openURL: openExternal };
+    const bridge = { isMock: true, missingBackend: !forceMock && inWails(), tab: 0, forTab: (id) => mock.apiFor(() => id), on: mock.on, openURL: openExternal };
+    bridge.api = mock.apiFor(() => bridge.tab);
+    return bridge;
   }
 
   // ------------------------------------------------------------------ MOCK
@@ -64,6 +84,24 @@
     const emit = (name, data) => (listeners[name] || []).forEach((cb) => cb(clone(data)));
     const ok = (v) => Promise.resolve(clone(v));
     const fail = (msg) => Promise.reject(msg);
+
+    // Abas: cada uma é uma conexão, com o estado e as mensagens dela. O resto
+    // deste arquivo foi escrito para uma conexão só e continua lendo as
+    // variáveis "da conexão" (st, messages, whisper…): enter(aba) troca essas
+    // variáveis pelas da aba antes de qualquer coisa rodar em nome dela — os
+    // métodos da API (apiFor) e os temporizadores (setTimeout, logo abaixo).
+    const MAX_TABS = 8;
+    const tabList = []; // as abas, na ordem em que aparecem
+    let tabSeq = 0;
+    let T = null;       // a aba cujas variáveis estão carregadas
+    let view = null;    // a aba à vista: só dela sai o estado inteiro
+    let mic = null;     // a aba em que falamos (null = nenhuma)
+    let lastTabs = '';  // o último resumo das abas publicado
+    const realTimeout = window.setTimeout.bind(window);
+    const realInterval = window.setInterval.bind(window);
+    // um temporizador criado em nome de uma aba roda com as variáveis dela
+    const setTimeout = (fn, ms) => { const t = T; return realTimeout(() => { if (t) enter(t); fn(); }, ms); };
+    const setInterval = (fn, ms) => { const t = T; return realInterval(() => { if (t) enter(t); fn(); }, ms); };
 
     const settings = { host: 'localhost', nickname: 'Furico Caolho', defaultChannel: '' };
     const audio = {
@@ -97,11 +135,15 @@
     let pokePopup = true; // cutucadas abrem uma janela (senão, só o som)
     const imagesCfg = { mode: 'ask', trusted: false }; // imagens de fora: só com clique, até o usuário liberar o servidor
     const UNMUTE_ERR = 'por segurança, um script não liga o microfone nem os alto-falantes: ele só pode mutar; quem desmuta é você';
-    const peer = { sharingSid: '', out: null, in: null, received: 0, patternTimer: 0 };
-    const peerSignal = (msg) => setTimeout(() => {
-      const c = findClient(PEER_ID);
-      if (st.status === 'connected' && c) emit('screen:signal', { from: PEER_ID, fromName: c.nickname, payload: JSON.stringify(msg) });
-    }, 30);
+    const peer = { sharingSid: '', out: null, in: null, received: 0, patternTimer: 0, tab: null }; // tab: a aba em que ele está
+    const peerSignal = (msg) => {
+      const t = peer.tab || T; // as respostas dele chegam depois de esperas: valem para a aba dele, não para a que estiver carregada
+      realTimeout(() => {
+        enter(t);
+        const c = findClient(PEER_ID);
+        if (st.status === 'connected' && c) emit('screen:signal', { tab: t.id, from: PEER_ID, fromName: c.nickname, payload: JSON.stringify(msg) });
+      }, 30);
+    };
     const peerGathered = (pc) => new Promise((resolve) => {
       if (pc.iceGatheringState === 'complete') return resolve();
       const t = setTimeout(resolve, 2000);
@@ -110,7 +152,7 @@
     function peerReset() {
       [peer.out, peer.in].forEach((pc) => { if (pc) { try { pc.close(); } catch (e) { /* já fechada */ } } });
       clearInterval(peer.patternTimer);
-      peer.out = peer.in = null; peer.received = 0; peer.sharingSid = '';
+      peer.out = peer.in = null; peer.received = 0; peer.sharingSid = ''; peer.tab = null;
     }
     async function peerOffer(sid) {
       // o "outro cliente" manda a tela dele: uma animação num canvas
@@ -145,9 +187,11 @@
     }
     function peerHandle(to, payload) {
       let msg; try { msg = JSON.parse(payload); } catch (e) { return; }
+      if (T.srv !== SERVERS.a) return; // o outro cliente Furito só existe no primeiro servidor
       const c = findClient(PEER_ID), me = findClient(SELF_ID);
       if (!c || !me || c.channelId !== me.channelId) return;
       if (to !== 0 && to !== PEER_ID) return;
+      peer.tab = T;
       switch (msg.t) {
         case 'hello': if (peer.sharingSid) peerSignal({ t: 'sharing', sid: peer.sharingSid }); break;
         case 'watch': if (msg.sid === peer.sharingSid && peer.sharingSid) peerOffer(msg.sid); else peerSignal({ t: 'stopped', sid: msg.sid }); break;
@@ -162,7 +206,7 @@
 
     // identidades: várias, uma padrão; a "em uso" é a da conexão atual
     let identities = [{ id: 'i1', name: 'Principal', nickname: '', uid: 'mK9xT2v0QwE7LrZp4JhYc1NdUas=', securityLevel: 8 }];
-    let identDefault = 'i1', identActive = 'i1', identSeq = 1;
+    let identDefault = 'i1', identActive = 'i1', identSeq = 1; // identActive: a da aba carregada
     const findIdent = (id) => identities.find((x) => x.id === id);
     const fakeUid = () => Array.from({ length: 27 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'[Math.floor(Math.random() * 64)]).join('') + '=';
     const groups = {
@@ -186,7 +230,7 @@
     if (demo === 'settings') hotkeys.errors.toggleMute = 'não foi possível registrar: combinação já usada pelo sistema';
     let autoReconnect = true, reconnectAttempt = 0, pttDown = false;
     let whisper = { kind: '', id: 0, name: '' }, talkRequested = false;
-    const chanPw = {}; // senhas de canais criados/editados aqui; os demais usam 1234
+    let chanPw = {}; // senhas de canais criados/editados aqui; os demais usam 1234 (por servidor: ver enter)
     const pwOf = (c) => (chanPw[c.id] != null ? chanPw[c.id] : '1234');
     const perm = (name, value, negated, skip) => ({ name, value, negated: !!negated, skip: !!skip });
     const perms = {
@@ -199,7 +243,7 @@
       'channel:7': [perm('i_client_talk_power', 50)],
     };
     const NOW = Math.floor(Date.now() / 1000);
-    const files = {
+    const FILES_A = {
       3: {
         '/': [
           { name: 'mapas', size: 0, modified: NOW - 3 * 86400, isDir: true },
@@ -213,17 +257,21 @@
         ],
       },
     };
+    let files = FILES_A; // os arquivos do servidor da aba carregada
     const filesOf = (channelId) => files[channelId] || (files[channelId] = { '/': [] });
     const normPath = (p) => '/' + String(p || '/').split('/').filter(Boolean).join('/');
     const parentPath = (p) => normPath(p.split('/').slice(0, -1).join('/'));
 
-    const messages = [];
-    let msgSeq = 0;
+    let messages = [];  // as mensagens da aba carregada
+    let msgSeq = 0;     // um contador só: o id de uma mensagem não se repete entre abas
     let connToken = 0;
-    let st = offline('');
+    let st = null;      // o estado da aba carregada (ver enter)
 
     function offline(error) {
-      peerReset(); // sem conexão não há compartilhamento de tela
+      if (!peer.tab || peer.tab === T) peerReset(); // sem conexão não há compartilhamento de tela
+      return offlineState(error);
+    }
+    function offlineState(error) {
       return {
         status: 'disconnected', error: error || '', host: '',
         server: { name: '', welcomeMessage: '', version: '', platform: '', maxClients: 0 },
@@ -247,7 +295,7 @@
       }, extra || {});
     }
 
-    const DESCRIPTIONS = {
+    const DESCRIPTIONS_A = {
       3: '[center][size=14][b]Informações[/b][/size][/center]\n[img]https://static.tibia.com/images/global/header/monsters/eradicator.gif[/img]\nBoss Boostado [b]Eradicator[/b]\n[hr]\n' +
         '[table]\n[tr][th]Personagem[/th][th]Level[/th][th]Vocação[/th][/tr]\n' +
         '[tr][td]Furico Caolho[/td][td][right]1250[/right][/td][td][color=#b00020]Elite Knight[/color][/td][/tr]\n' +
@@ -257,9 +305,9 @@
       33: '[color=#b00020][b]Counter-Strike[/b][/color]\nPartidas todas as noites às [i]21h[/i].',
       8: 'Só música. [u]Sem conversa[/u] aqui!',
     };
-    const CLIENT_DETAILS = {
-      12: { version: '1.0.0', platform: 'Diogo Agra', furito: true, connectedSince: Date.now() - 1000 },
-      3: { version: '1.0.0', platform: 'Diogo Agra', connectedSince: Date.now() - 3725 * 1000 },
+    const CLIENT_DETAILS_A = {
+      12: { version: 'Furito TS 1.0.0', platform: '', furito: true, connectedSince: Date.now() - 1000 },
+      3: { version: 'Furito TS 1.0.0', platform: '', connectedSince: Date.now() - 3725 * 1000 },
       4: { version: '3.6.2 [Stable]', platform: 'Windows', connectedSince: Date.now() - 95 * 1000 },
       5: { version: '6.0.0-beta3', platform: 'Windows', connectedSince: Date.now() - 2 * 86400 * 1000 },
       6: { version: '3.5.6 [Stable]', platform: 'Linux', connectedSince: Date.now() - 40 * 60 * 1000 },
@@ -268,7 +316,59 @@
       9: { version: '3.6.1 [Stable]', platform: 'Android', connectedSince: Date.now() - 4 * 3600 * 1000 },
     };
 
+    // O segundo servidor de demonstração. Os números de canal e de cliente são
+    // os mesmos do primeiro, de propósito: é assim nos servidores de verdade, e
+    // é assim que uma mistura entre abas apareceria.
+    const DESCRIPTIONS_B = {
+      1: 'Entrada do servidor do escritório.',
+      3: '[b]Pauta de segunda:[/b] metas do trimestre.',
+    };
+    const CLIENT_DETAILS_B = {
+      12: { version: 'Furito TS 1.0.0', platform: '', furito: true, connectedSince: Date.now() - 1000 },
+      3: { version: '6.0.0-beta3', platform: 'macOS', connectedSince: Date.now() - 5400 * 1000 },
+      4: { version: '3.6.2 [Stable]', platform: 'Windows', connectedSince: Date.now() - 20 * 60 * 1000 },
+      5: { version: '3.6.2 [Stable]', platform: 'Linux', connectedSince: Date.now() - 3 * 3600 * 1000 },
+      6: { version: '3.6.1 [Stable]', platform: 'iOS', connectedSince: Date.now() - 8 * 3600 * 1000 },
+    };
+    const SERVERS = {
+      a: { descriptions: DESCRIPTIONS_A, details: CLIENT_DETAILS_A, files: FILES_A, chanPw: {} },
+      b: { descriptions: DESCRIPTIONS_B, details: CLIENT_DETAILS_B, files: {}, chanPw: {} },
+    };
+    let DESCRIPTIONS = DESCRIPTIONS_A, CLIENT_DETAILS = CLIENT_DETAILS_A; // os do servidor da aba carregada
+    // endereços que começam com "outro" ou "escritorio" levam ao segundo servidor
+    const serverFor = (host) => (/^(outro|escritorio)\b/i.test(String(host)) ? SERVERS.b : SERVERS.a);
+
+    function buildOnlineB(host) {
+      const channels = [
+        ch(1, 0, 0, 'Recepção', { topic: 'Chegou? Diga oi.', isDefault: true }),
+        ch(2, 0, 0, '[cspacer1]Trabalho'),
+        ch(3, 0, 0, 'Reunião semanal', { topic: 'Toda segunda, 10h' }),
+        ch(4, 3, 1, 'Sala pequena', { maxClients: 4 }),
+        ch(5, 0, 0, 'Diretoria', { hasPassword: true }),
+        ch(6, 0, 0, 'Café'),
+      ];
+      const clients = [
+        cl(SELF_ID, 1, settings.nickname, Object.assign({ inputMuted: selfFlags.muted, outputMuted: selfFlags.deafened, away: selfFlags.away, awayMessage: selfFlags.awayMessage })),
+        cl(3, 1, 'Bia Ribeiro', { serverGroups: ['Server Admin'], serverGroupIds: [6], groups: [{ name: 'Server Admin', iconId: 300 }], icons: [{ id: 300, title: 'Server Admin' }] }),
+        cl(4, 3, 'Caio Mendes', { serverGroups: ['Normal'], serverGroupIds: [7] }),
+        cl(5, 3, 'Duda', { inputMuted: true }),
+        cl(6, 6, 'Edu Lima', { away: true, awayMessage: 'reunião externa' }),
+      ].sort((a, b) => a.nickname.localeCompare(b.nickname, 'pt-BR'));
+      channels.forEach((c) => { c.isTemporary = !c.isPermanent && !c.isSemiPermanent; });
+      return {
+        status: 'connected', error: '', host,
+        server: {
+          name: 'Escritório', welcomeMessage: 'Bem-vindo ao servidor do escritório.',
+          version: '6.0.0-beta13.1 [Build: 1790080330]', platform: 'Linux', maxClients: 64,
+          uid: 'Of1cE7bQ2zXw9LmN4pRt6VyHsKc=', bannerUrl: '', bannerLink: '',
+        },
+        self: Object.assign({ clientId: SELF_ID, channelId: 1, nickname: settings.nickname }, selfFlags),
+        channels, clients, audio,
+      };
+    }
+
     function buildOnline(host) {
+      if (T.srv === SERVERS.b) return buildOnlineB(host);
       const channels = [
         ch(1, 0, 0, 'Default Channel', { topic: 'Default Channel has no topic', isDefault: true }),
         ch(2, 0, 0, '[cspacer1]Jogos'),
@@ -309,17 +409,73 @@
       };
     }
 
+    // ---- abas
+    function newTab() {
+      return {
+        id: ++tabSeq, st: offlineState(''), messages: [], whisper: { kind: '', id: 0, name: '' }, talkRequested: false,
+        connToken: 0, reconnectAttempt: 0, identActive: identDefault, recordingSince: 0,
+        srv: SERVERS.a, silenced: false, unread: 0, closed: false,
+      };
+    }
+    // save guarda na aba carregada as variáveis dela; enter carrega as de outra.
+    function save() {
+      if (!T) return;
+      Object.assign(T, { st, messages, whisper, talkRequested, connToken, reconnectAttempt, identActive, recordingSince: selfFlags.recordingSince });
+      T.srv.chanPw = chanPw;
+    }
+    function enter(t) {
+      if (t === T) return;
+      save();
+      T = t;
+      st = t.st; messages = t.messages; whisper = t.whisper; talkRequested = t.talkRequested;
+      connToken = t.connToken; reconnectAttempt = t.reconnectAttempt; identActive = t.identActive;
+      selfFlags.recordingSince = t.recordingSince;
+      useServer(t.srv);
+    }
+    function useServer(srv) {
+      T.srv = srv;
+      DESCRIPTIONS = srv.descriptions; CLIENT_DETAILS = srv.details; files = srv.files; chanPw = srv.chanPw;
+    }
+    // o resumo das abas, como o backend o manda para a barra de abas
+    function tabsSummary() {
+      save();
+      return tabList.map((t) => ({
+        id: t.id, name: t.st.server.name || t.st.host || '', host: t.st.host || '', status: t.st.status,
+        mic: t === mic, silenced: !!t.silenced, unread: t.unread,
+      }));
+    }
+    // As regras do microfone são as do backend: fica com a primeira conexão; uma
+    // aba nova não o toma; quando a pessoa sai do servidor em que falava, só
+    // muda sozinho se sobrar uma única conexão.
+    function claimMic(t) {
+      save();
+      if (mic !== t && (!mic || mic.closed || mic.st.status === 'disconnected')) mic = t;
+    }
+    function releaseMic(t) {
+      if (mic !== t) return;
+      save();
+      const live = tabList.filter((x) => x !== t && x.st.status === 'connected');
+      mic = live.length === 1 ? live[0] : null;
+    }
+
     function sync() {
       const on = st.status === 'connected';
       st.audio = audio;
       if (!on) selfFlags.recordingSince = 0; // a gravação termina ao desconectar
       Object.assign(st.self, selfFlags);
-      if (!on) { whisper = { kind: '', id: 0, name: '' }; talkRequested = false; pttDown = false; }
+      if (!on) { whisper = { kind: '', id: 0, name: '' }; talkRequested = false; }
+      if (!tabList.some((t) => (t === T ? st : t.st).status === 'connected')) pttDown = false;
       st.self.whisper = whisper;
       st.self.talkRequested = talkRequested;
+      // mutar e ausente valem para o app inteiro: o nosso cliente mostra isso em todas as abas
+      const me = on ? findClient(SELF_ID) : null;
+      if (me) Object.assign(me, { inputMuted: selfFlags.muted, outputMuted: selfFlags.deafened || T.silenced, away: selfFlags.away, awayMessage: selfFlags.awayMessage });
+      st.tab = T.id;
+      st.tabs = tabsSummary();
       const act = findIdent(identActive) || identities[0];
       st.identity = { id: act.id, name: act.name, uid: act.uid, securityLevel: act.securityLevel, serverUid: '' };
-      st.identities = identities.map((x) => Object.assign({}, x, { isDefault: x.id === identDefault, inUse: x.id === act.id }));
+      const used = tabList.map((t) => (findIdent(t.identActive) || identities[0]).id);
+      st.identities = identities.map((x) => Object.assign({}, x, { isDefault: x.id === identDefault, inUse: used.includes(x.id) }));
       st.appVersion = '1.0.0';
       st.appAuthor = 'Diogo Agra';
       st.appSite = 'https://diogoagra.dev';
@@ -334,16 +490,32 @@
       st.reconnectAttempt = st.status === 'reconnecting' ? reconnectAttempt : 0;
       return st;
     }
-    function pushState() { emit('state', sync()); }
+    // Só o estado da aba à vista é publicado inteiro; mudança numa aba de fundo
+    // publica só o resumo das abas (evento "tabs"), como no backend.
+    function pushState() {
+      if (T !== view) { pushTabs(); return; }
+      const s = sync();
+      lastTabs = JSON.stringify(s.tabs);
+      emit('state', s);
+    }
+    function pushTabs() {
+      const list = tabsSummary();
+      const sig = JSON.stringify(list);
+      if (sig !== lastTabs) { lastTabs = sig; emit('tabs', list); }
+    }
+    // publica o estado da aba à vista, seja qual for a aba carregada
+    function pushView() { const prev = T; enter(view); pushState(); enter(prev); }
 
     function addMsg(m, silent, at) {
       const msg = Object.assign({
-        id: ++msgSeq, time: at || Date.now(), kind: 'log', level: 'info', targetMode: 0,
+        id: ++msgSeq, tab: T.id, time: at || Date.now(), kind: 'log', level: 'info', targetMode: 0,
         peerId: 0, peerName: '', invokerId: 0, invokerName: '', text: '', self: false,
       }, m);
       messages.push(msg);
       if (messages.length > 500) messages.shift();
       if (!silent) emit('message', msg);
+      // bate-papo numa aba fora da vista conta como não lido na barra de abas
+      if (!silent && T !== view && msg.kind === 'chat' && !msg.self && !msg.history) { T.unread++; pushTabs(); }
       return msg;
     }
     const log = (level, text, silent, at) => addMsg({ kind: 'log', level, text }, silent, at);
@@ -366,7 +538,7 @@
         if (r.ok) scripts.unshift({ id: 'exemplos', name: 'Exemplos: todas as funções', code: await r.text(), enabled: false, moderation: false });
       } catch (e) { /* página aberta como arquivo: fica sem os exemplos */ }
     }
-    function scriptEvent(ev) { if (scripts.some((x) => x.enabled)) emit('script:event', ev); }
+    function scriptEvent(ev) { if (scripts.some((x) => x.enabled)) emit('script:event', Object.assign({ tab: T.id }, ev)); } // tab: de que aba é o evento
     const scriptClient = (c) => ({
       id: c.id, nickname: c.nickname, uid: c.uid, channelId: c.channelId, away: !!c.away, awayMessage: c.awayMessage || '',
       inputMuted: !!c.inputMuted, outputMuted: !!c.outputMuted, serverGroups: c.serverGroups || [], country: c.country || '',
@@ -429,8 +601,10 @@
 
     function seedOnline(host, silent) {
       const t = Date.now() - 1000;
-      log('info', 'Tentando resolver nome do host [b]' + host + '[/b]', silent, t);
-      log('info', 'Tentando conectar-se ao servidor [b]' + host + '[/b]', silent, t);
+      if (silent) { // ao conectar de verdade, Connect já pôs estas duas linhas no registro
+        log('info', 'Tentando resolver nome do host [b]' + host + '[/b]', true, t);
+        log('info', 'Tentando conectar-se ao servidor [b]' + host + '[/b]', true, t);
+      }
       st = buildOnline(host);
       addMsg({ kind: 'log', level: 'success', text: st.server.welcomeMessage, rich: true }, silent, t); // a única linha de registro com BBCode
       log('info', 'Conectado ao servidor: [b]"' + st.server.name + '"[/b]', silent, t);
@@ -441,7 +615,10 @@
       }
     }
 
-    // estado inicial
+    // estado inicial: uma aba, que fica com o microfone
+    tabList.push(newTab());
+    view = mic = tabList[0];
+    enter(tabList[0]);
     if (demo !== 'dialog' && demo !== 'disconnected') { seedHistory(); seedOnline('localhost', true); }
     else log('info', 'Bem-vindo ao Furito TS (modo demonstração).', true);
     if (demo === 'reconnect') {
@@ -456,25 +633,34 @@
     // simulação de voz / nível do microfone
     let tick = 0;
     let lastTalking = '';
-    setInterval(() => {
+    realInterval(() => {
       tick++;
-      if (st.status !== 'connected') {
-        if (lastTalking !== 'off') { lastTalking = 'off'; emit('talking', { clients: [], self: false, micLevel: 0 }); }
-        return;
-      }
+      enter(view);
+      const live = tabsSummary().some((t) => t.status === 'connected');
       const speaking = Math.floor(tick / 25) % 2 === 0; // alterna a cada 2,5 s
-      const micLevel = selfFlags.muted || !audio.captureAvailable ? 0
+      // quem fala em cada servidor: no primeiro, os clientes 3 e 4 se alternam; no segundo, o 4 fala de tempos em tempos
+      const voices = (t) => {
+        const tst = t === T ? st : t.st;
+        const has = (id) => tst.clients.some((c) => c.id === id);
+        if (tst.status !== 'connected' || selfFlags.deafened || t.silenced) return [];
+        if (t.srv === SERVERS.b) return Math.floor(tick / 30) % 3 === 1 && has(4) ? [4] : [];
+        if (speaking && has(3)) return [3];
+        return !speaking && has(4) && tick % 50 < 30 ? [4] : [];
+      };
+      const tabs = tabList.filter((t) => voices(t).length > 0).map((t) => t.id);
+      const micLevel = !live || selfFlags.muted || !audio.captureAvailable ? 0
         : Math.round(40 + (Math.floor(tick / 18) % 3 === 1 ? 900 + 700 * Math.abs(Math.sin(tick / 2)) : 60 * Math.abs(Math.sin(tick / 3))));
       const voiceProb = micLevel > 500 ? 0.95 : 0.03;
-      const self = !selfFlags.muted && (audio.vadMode === 'ptt' ? pttDown : audio.vadMode === 'level' ? micLevel >= audio.vadThreshold : voiceProb > 0.5 && micLevel >= audio.vadFloor);
-      const clients = [];
-      if (!selfFlags.deafened) {
-        if (speaking && findClient(3)) clients.push(3);
-        if (!speaking && findClient(4) && tick % 50 < 30) clients.push(4);
-      }
+      const open = live && !selfFlags.muted && (audio.vadMode === 'ptt' ? pttDown : audio.vadMode === 'level' ? micLevel >= audio.vadThreshold : voiceProb > 0.5 && micLevel >= audio.vadFloor);
+      // só transmitimos na aba do microfone; o nosso nome só acende quando ela é a que está à vista
+      const tx = open && !!mic && (mic === T ? st : mic.st).status === 'connected';
+      const self = tx && mic === view;
+      const clients = voices(view);
       if (self) clients.push(SELF_ID);
-      const sig = clients.join(',') + '|' + self + '|' + micLevel;
-      if (sig !== lastTalking) { lastTalking = sig; emit('talking', { clients, self, micLevel, voiceProb }); }
+      const sig = live ? clients.join(',') + '|' + self + '|' + tx + '|' + tabs.join(',') + '|' + micLevel : 'off';
+      if (sig === lastTalking) return;
+      lastTalking = sig;
+      emit('talking', live ? { clients, self, tx, tabs, micLevel, voiceProb } : { clients: [], self: false, tx: false, tabs: [], micLevel: 0 });
     }, 100);
 
     const api = {
@@ -488,6 +674,7 @@
         if (!host) return fail('endereço do servidor vazio');
         if (req.identityId && !findIdent(req.identityId)) return fail('identidade não encontrada (ela pode ter sido apagada)');
         identActive = req.identityId || identDefault;
+        useServer(serverFor(host));
         settings.host = host;
         if (req.nickname) settings.nickname = String(req.nickname);
         settings.defaultChannel = req.defaultChannel || '';
@@ -503,16 +690,19 @@
           if (/erro|falha|fail/i.test(host)) {
             st = offline('Falha ao conectar: o servidor não respondeu (tempo esgotado)');
             log('error', st.error);
+            releaseMic(T);
             pushState();
             return;
           }
           if (req.serverPassword === 'errada') {
             st = offline('Senha do servidor inválida');
             log('error', st.error);
+            releaseMic(T);
             pushState();
             return;
           }
           seedOnline(host, false);
+          claimMic(T);
           pushState();
         }, 900);
         return ok(null);
@@ -524,7 +714,78 @@
         const was = st.status;
         st = offline('');
         if (was !== 'disconnected') log('info', 'Desconectado do servidor');
+        releaseMic(T);
         pushState();
+        return ok(null);
+      },
+
+      // ---------------------------------------------------------- abas (várias conexões)
+      // Conecta sem sair dos outros servidores: abre uma aba, que fica à vista.
+      // Aba parada é reaproveitada, para não sobrar aba vazia.
+      ConnectNewTab(req) {
+        req = req || {};
+        if (!String(req.host || '').trim()) return fail('informe o endereço do servidor');
+        const prev = view;
+        let t = T, created = false;
+        if (st.status !== 'disconnected') {
+          if (tabList.length >= MAX_TABS) return fail('limite de ' + MAX_TABS + ' abas: feche uma para abrir outra');
+          t = newTab();
+          tabList.push(t);
+          created = true;
+        }
+        view = t;
+        t.unread = 0;
+        enter(t);
+        return api.Connect(req).then(() => t.id, (e) => {
+          if (created) {
+            tabList.splice(tabList.indexOf(t), 1);
+            t.closed = true;
+            view = prev;
+            pushView();
+          }
+          return Promise.reject(e);
+        });
+      },
+      ConnectBookmarkNewTab(id) {
+        const b = bookmarks.find((x) => x.id === id);
+        if (!b) return fail('favorito inexistente');
+        return api.ConnectNewTab({ host: b.host, nickname: b.nickname || settings.nickname, defaultChannel: b.defaultChannel, identityId: b.identityId || '' });
+      },
+      SelectTab() {
+        view = T;
+        T.unread = 0;
+        pushState();
+        return ok(sync());
+      },
+      // Sai do servidor e fecha a aba; a última não some, fica desconectada.
+      CloseTab() {
+        const closing = T, was = st.status;
+        connToken++;
+        reconnectAttempt = 0;
+        st = offline('');
+        selfFlags.recordingSince = 0;
+        closing.silenced = false;
+        releaseMic(closing);
+        if (tabList.length > 1) {
+          const i = tabList.indexOf(closing);
+          tabList.splice(i, 1);
+          closing.closed = true;
+          if (view === closing) { view = tabList[Math.max(i - 1, 0)]; view.unread = 0; }
+        } else if (was !== 'disconnected') {
+          log('info', 'Desconectado do servidor');
+        }
+        pushView();
+        return ok(null);
+      },
+      SetMicTab() {
+        if (st.status === 'disconnected') return fail('conecte esta aba a um servidor para falar nela');
+        mic = T;
+        pushView();
+        return ok(null);
+      },
+      SetTabSilenced(on) {
+        T.silenced = !!on;
+        pushView();
         return ok(null);
       },
 
@@ -579,6 +840,12 @@
           return ok({ recording: false, path: '~/Music/Furito TS/demonstração.wav', seconds });
         }
         if (st.status !== 'connected') return fail('conecte-se a um servidor para gravar a conversa');
+        tabList.forEach((t) => { // grava-se uma conexão por vez: começar numa encerra a de outra
+          if (t === T || !t.recordingSince) return;
+          t.recordingSince = 0;
+          const other = t.st.clients.find((c) => c.id === SELF_ID);
+          if (other) other.isRecording = false;
+        });
         selfFlags.recordingSince = Date.now();
         const me = findClient(SELF_ID); if (me) me.isRecording = true;
         log('info', 'Gravando a conversa em ~/Music/Furito TS/demonstração.wav — os outros veem o indicador de gravação ao lado do seu nome.');
@@ -736,17 +1003,21 @@
       SetDefaultIdentity(id) {
         if (!findIdent(id)) return fail('identidade não encontrada');
         identDefault = id;
-        if (st.status === 'disconnected') identActive = id;
+        save();
+        tabList.forEach((t) => { if (t.st.status === 'disconnected') t.identActive = id; }); // as abas paradas passam a usá-la
+        identActive = T.identActive;
         pushState();
         return ok(null);
       },
       DeleteIdentity(id) {
         if (!findIdent(id)) return fail('identidade não encontrada');
         if (identities.length === 1) return fail('esta é a única identidade; crie ou importe outra antes de apagá-la');
-        if (id === identActive && st.status !== 'disconnected') return fail('esta identidade está em uso na conexão atual; desconecte antes de apagá-la');
+        save();
+        if (tabList.some((t) => t.identActive === id && t.st.status !== 'disconnected')) return fail('esta identidade está em uso numa conexão aberta; desconecte antes de apagá-la');
         identities = identities.filter((x) => x.id !== id);
         if (identDefault === id) identDefault = identities[0].id;
-        if (identActive === id) identActive = identDefault;
+        tabList.forEach((t) => { if (t.identActive === id) t.identActive = identDefault; });
+        identActive = T.identActive;
         pushState();
         return ok(null);
       },
@@ -871,6 +1142,7 @@
       ScreenCaptureStop() { return ok(null); },
       // só no modo demonstração: o outro cliente começa/para de compartilhar e conta o que recebeu
       _mockPeerShare(on) {
+        peer.tab = T;
         peer.sharingSid = on ? 'mock' + Date.now().toString(36) : '';
         if (on) peerSignal({ t: 'sharing', sid: peer.sharingSid });
         else { peerSignal({ t: 'stopped', sid: '' }); if (peer.out) { peer.out.close(); peer.out = null; } clearInterval(peer.patternTimer); }
@@ -926,7 +1198,7 @@
         setTimeout(() => {
           if (!findClient(clientId)) return;
           log('warn', '"' + c.nickname + '" cutucou você: para de me cutucar!'); // a linha no registro sai sempre
-          if (pokePopup) emit('poke', { fromName: c.nickname, message: 'para de me cutucar!' });
+          if (pokePopup) emit('poke', { tab: T.id, server: st.server.name, fromName: c.nickname, message: 'para de me cutucar!' });
         }, 900);
         return ok(null);
       },
@@ -1242,6 +1514,7 @@
           if (token !== connToken) return;
           reconnectAttempt = 0;
           seedOnline(host, false);
+          claimMic(T);
           pushState();
         }, 700);
         return ok(null);
@@ -1263,8 +1536,25 @@
       },
     };
 
+    // apiFor devolve a API presa a uma aba: tab() diz o número dela na hora da
+    // chamada (0 = a que está à vista), como Bridge.Call no app de verdade.
+    function apiFor(tab) {
+      const out = {};
+      Object.keys(api).forEach((name) => {
+        if (typeof api[name] !== 'function') return;
+        out[name] = (...args) => {
+          const id = Number(tab()) || 0;
+          const t = id ? tabList.find((x) => x.id === id) : view;
+          if (!t) return fail('esta aba foi fechada');
+          enter(t);
+          return api[name](...args);
+        };
+      });
+      return out;
+    }
+
     return {
-      api,
+      apiFor,
       on(name, cb) { (listeners[name] = listeners[name] || []).push(cb); },
     };
   }

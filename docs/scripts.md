@@ -28,6 +28,17 @@ ts.at('20:00', () => ts.sendChannelMessage('Hora do evento!'));   // todo dia
 A lista completa, com os campos de cada evento, está no botão "Referência…"
 da janela.
 
+**Com vários servidores abertos**, cada script ligado roda uma vez para cada
+servidor (uma cópia por aba), sem nada em comum entre as cópias. Dentro do
+script, `ts` é sempre o servidor daquela cópia: os eventos são os dele, as
+consultas e as ações vão para ele, e os temporizadores (`ts.every`, `ts.at`)
+disparam em cada servidor. O que o script guarda em variáveis também é de
+cada servidor — um contador de entradas conta as daquele servidor. No
+registro do script, cada linha diz de que servidor veio. Duas coisas são do
+app inteiro e não de um servidor: `ts.playSound` sai pelo microfone, então só
+funciona na cópia do servidor em que você fala (nas outras devolve erro; use
+`ts.playSoundLocal`), e mutar e ausente valem para todos os servidores.
+
 A lista já começa com o script **"Exemplos: todas as funções"**
 (`frontend/script-examples.js`), desligado: é uma consulta que roda de
 verdade. Ligado, ele escreve no registro cada evento do servidor, mostra os
@@ -69,7 +80,8 @@ Como funciona e o que protege:
   do canal (motivo)").
 - **Limite contra flood**: mensagens, cutucadas e ações de moderação de
   scripts saem até 4 seguidas e depois uma a cada 5 segundos, somando todos os
-  scripts (o servidor bloqueia quem manda comandos demais). O excesso é
+  scripts e contando cada servidor à parte (é o servidor que bloqueia quem
+  manda comandos demais). O excesso é
   recusado com um erro no registro do script. Sons do soundboard: até 5
   seguidos, depois um a cada 3 segundos.
 - **Um script não abre o microfone.** `ts.setMuted(true)` e

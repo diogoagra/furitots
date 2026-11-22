@@ -5,6 +5,12 @@ não veem nem recebem nada). Botão do monitor na barra de ferramentas para
 compartilhar; quem está compartilhando ganha um ícone de monitor na árvore —
 clique nele (ou botão direito → "Assistir à tela") para abrir o vídeo.
 
+Com vários servidores abertos, a transmissão é do servidor (da aba) em que
+começou: você continua compartilhando enquanto olha outra aba, e o indicador
+da barra de estado segue à vista. Assistir é diferente: o vídeo é mostrado na
+aba de quem compartilha, então sair dela para de assistir. Só há uma
+transmissão sua por vez.
+
 Como funciona:
 
 - O servidor TeamSpeak não transporta vídeo. Os clientes combinam a
@@ -18,7 +24,7 @@ Como funciona:
   descobrir o endereço IP um do outro (o TeamSpeak normalmente esconde o IP
   dos outros usuários). O app avisa antes do primeiro uso. Para esconder o IP,
   configure um servidor de retransmissão TURN (por exemplo um `coturn` da
-  comunidade) em Ajustes → Compartilhamento de tela e marque "Esconder meu
+  comunidade) em Ajustes → Tela e marque "Esconder meu
   IP": todo o vídeo passa por ele. A senha do TURN fica no arquivo de ajustes.
 - **Captura:** no macOS é feita pelo app (ScreenCaptureKit, macOS 12.3+); na
   primeira vez o sistema pede a permissão de Gravação de Tela e o app precisa

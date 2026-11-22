@@ -59,6 +59,7 @@ type ScriptDTO struct {
 
 // ScriptEvent é o que um script recebe em ts.on(tipo, …).
 type ScriptEvent struct {
+	Tab     int            `json:"tab"` // a conexão (aba) em que aconteceu
 	Type    string         `json:"type"`
 	Client  *ScriptClient  `json:"client,omitempty"`
 	Channel *ScriptChannel `json:"channel,omitempty"` // o canal do evento (o nosso, nas entradas e saídas)
@@ -125,9 +126,6 @@ type scriptStore struct {
 	list   []ScriptDTO
 	seeded bool // o script de exemplos já foi posto na lista
 
-	talkTokens float64
-	talkLast   time.Time
-
 	soundTokens float64
 	soundLast   time.Time
 }
@@ -144,7 +142,6 @@ type scriptFile struct {
 // desligado; example é o código dele ("" = não há).
 func (st *scriptStore) load(path, example string) {
 	st.path = path
-	st.talkTokens = scriptTalkBurst
 	var f scriptFile
 	data, err := os.ReadFile(path)
 	switch {
@@ -225,21 +222,22 @@ func (st *scriptStore) allowSound(now time.Time) bool {
 	return true
 }
 
-// allowTalk diz se mais uma mensagem ou cutucada de script pode sair agora.
-func (st *scriptStore) allowTalk(now time.Time) bool {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if !st.talkLast.IsZero() {
-		st.talkTokens += float64(now.Sub(st.talkLast)) / float64(scriptTalkEvery)
-		if st.talkTokens > scriptTalkBurst {
-			st.talkTokens = scriptTalkBurst
-		}
+// allowScriptTalk diz se mais uma mensagem, cutucada ou ação de moderação de
+// script pode sair agora por esta conexão. O limite existe por causa do
+// bloqueio por flood, que é de cada servidor: por isso é contado por conexão.
+func (c *conn) allowScriptTalk(now time.Time) bool {
+	c.talkMu.Lock()
+	defer c.talkMu.Unlock()
+	if c.talkLast.IsZero() {
+		c.talkTokens = scriptTalkBurst
+	} else {
+		c.talkTokens = min(scriptTalkBurst, c.talkTokens+float64(now.Sub(c.talkLast))/float64(scriptTalkEvery))
 	}
-	st.talkLast = now
-	if st.talkTokens < 1 {
+	c.talkLast = now
+	if c.talkTokens < 1 {
 		return false
 	}
-	st.talkTokens--
+	c.talkTokens--
 	return true
 }
 
@@ -322,9 +320,10 @@ func (api *API) SetScriptEnabled(id string, on bool) error {
 // ---------------------------------------------------------------- eventos
 
 // scriptEvent entrega um evento aos scripts (se houver algum ligado).
-func (a *App) scriptEvent(ev ScriptEvent) {
-	if a.scripts.anyEnabled() {
-		a.emit("script:event", ev)
+func (c *conn) scriptEvent(ev ScriptEvent) {
+	if c.app.scripts.anyEnabled() {
+		ev.Tab = c.id
+		c.app.emit("script:event", ev)
 	}
 }
 
@@ -366,8 +365,8 @@ func scriptChannel(id int, snap ts3.Snapshot) *ScriptChannel {
 // scriptSender descreve quem mandou uma mensagem ou cutucada: o cliente como
 // está no servidor (achado pelo id ou, sem id, pelo apelido — que é único no
 // servidor), ou só o que veio na mensagem, se ele já saiu.
-func (a *App) scriptSender(id int, name, uid string) *ScriptClient {
-	snap := a.client.Snapshot()
+func (c *conn) scriptSender(id int, name, uid string) *ScriptClient {
+	snap := c.client.Snapshot()
 	for _, cl := range snap.Clients {
 		if (id != 0 && int(cl.ID) == id) || (id == 0 && cl.Nickname == name) {
 			return scriptClient(cl, snap)
@@ -377,11 +376,11 @@ func (a *App) scriptSender(id int, name, uid string) *ScriptClient {
 }
 
 // onClientEvent traduz as movimentações de clientes em eventos para os scripts.
-func (a *App) onClientEvent(ev ts3.ClientEvent) {
-	if !a.scripts.anyEnabled() {
+func (c *conn) onClientEvent(ev ts3.ClientEvent) {
+	if !c.app.scripts.anyEnabled() {
 		return
 	}
-	snap := a.client.Snapshot()
+	snap := c.client.Snapshot()
 	out := ScriptEvent{
 		Client: scriptClient(ev.Client, snap),
 		From:   scriptChannel(ev.From, snap),
@@ -402,7 +401,8 @@ func (a *App) onClientEvent(ev ts3.ClientEvent) {
 	default:
 		return
 	}
-	a.emit("script:event", out)
+	out.Tab = c.id
+	c.app.emit("script:event", out)
 }
 
 // ---------------------------------------------------------------- ações
@@ -421,22 +421,22 @@ func (api *API) ScriptCall(id, action string, args map[string]any) (any, error) 
 
 	switch action {
 	case "sendChannelMessage":
-		return nil, a.scriptTalk(func() { a.client.SendTextMessage(2, 0, str("text")) }, str("text"), maxMessageRunes)
+		return nil, api.c.scriptTalk(func() { api.c.client.SendTextMessage(2, 0, str("text")) }, str("text"), maxMessageRunes)
 	case "sendServerMessage":
-		return nil, a.scriptTalk(func() { a.client.SendTextMessage(3, 0, str("text")) }, str("text"), maxMessageRunes)
+		return nil, api.c.scriptTalk(func() { api.c.client.SendTextMessage(3, 0, str("text")) }, str("text"), maxMessageRunes)
 	case "sendPrivateMessage":
-		to, err := a.scriptTarget(num("clientId"))
+		to, err := api.c.scriptTarget(num("clientId"))
 		if err != nil {
 			return nil, err
 		}
-		return nil, a.scriptTalk(func() { a.client.SendTextMessage(1, to, str("text")) }, str("text"), maxMessageRunes)
+		return nil, api.c.scriptTalk(func() { api.c.client.SendTextMessage(1, to, str("text")) }, str("text"), maxMessageRunes)
 	case "poke":
-		to, err := a.scriptTarget(num("clientId"))
+		to, err := api.c.scriptTarget(num("clientId"))
 		if err != nil {
 			return nil, err
 		}
 		var pokeErr error
-		if err := a.scriptTalk(func() { pokeErr = a.client.PokeClient(uint16(to), str("text")) }, str("text"), maxPokeRunes); err != nil {
+		if err := api.c.scriptTalk(func() { pokeErr = api.c.client.PokeClient(uint16(to), str("text")) }, str("text"), maxPokeRunes); err != nil {
 			return nil, err
 		}
 		return nil, pokeErr
@@ -444,20 +444,20 @@ func (api *API) ScriptCall(id, action string, args map[string]any) (any, error) 
 	// moderação: só para scripts em que o usuário marcou "Pode moderar"; o
 	// servidor ainda decide se nós temos a permissão
 	case "moveClient":
-		ch := scriptChannel(num("channelId"), a.client.Snapshot())
+		ch := scriptChannel(num("channelId"), api.c.client.Snapshot())
 		if sc.Moderation && (ch == nil || ch.Name == "") {
 			return nil, errors.New("canal não encontrado")
 		}
-		return nil, a.scriptModerate(sc, num("clientId"), "moveu %s para o canal", func() string { return quote(ch.Name) }, func(to uint16) error {
-			return a.client.MoveClient(to, ch.ID, str("password"))
+		return nil, api.c.scriptModerate(sc, num("clientId"), "moveu %s para o canal", func() string { return quote(ch.Name) }, func(to uint16) error {
+			return api.c.client.MoveClient(to, ch.ID, str("password"))
 		})
 	case "kickFromChannel":
-		return nil, a.scriptModerate(sc, num("clientId"), "expulsou %s do canal", reasonNote(str("reason")), func(to uint16) error {
-			return a.client.KickClient(to, false, str("reason"))
+		return nil, api.c.scriptModerate(sc, num("clientId"), "expulsou %s do canal", reasonNote(str("reason")), func(to uint16) error {
+			return api.c.client.KickClient(to, false, str("reason"))
 		})
 	case "kickFromServer":
-		return nil, a.scriptModerate(sc, num("clientId"), "expulsou %s do servidor", reasonNote(str("reason")), func(to uint16) error {
-			return a.client.KickClient(to, true, str("reason"))
+		return nil, api.c.scriptModerate(sc, num("clientId"), "expulsou %s do servidor", reasonNote(str("reason")), func(to uint16) error {
+			return api.c.client.KickClient(to, true, str("reason"))
 		})
 	case "ban":
 		// A duração tem de vir escrita: esquecer o número não pode virar um
@@ -470,21 +470,26 @@ func (api *API) ScriptCall(id, action string, args map[string]any) (any, error) 
 		if secs == 0 {
 			how = "baniu %s permanentemente"
 		}
-		return nil, a.scriptModerate(sc, num("clientId"), how, reasonNote(str("reason")), func(to uint16) error {
-			return a.client.BanClient(to, int(secs), str("reason"))
+		return nil, api.c.scriptModerate(sc, num("clientId"), how, reasonNote(str("reason")), func(to uint16) error {
+			return api.c.client.BanClient(to, int(secs), str("reason"))
 		})
 	case "setTalker":
 		what := "tirou a palavra de %s"
 		if flag("talker") {
 			what = "deu a palavra a %s"
 		}
-		return nil, a.scriptModerate(sc, num("clientId"), what, nil, func(to uint16) error {
-			return a.client.SetClientTalker(to, flag("talker"))
+		return nil, api.c.scriptModerate(sc, num("clientId"), what, nil, func(to uint16) error {
+			return api.c.client.SetClientTalker(to, flag("talker"))
 		})
 
 	case "playSound":
 		if !a.scripts.allowSound(time.Now()) {
 			return nil, errScriptSoundFlood
+		}
+		// O som "para o canal" sai pelo microfone, que está num servidor só:
+		// pedido por outra conexão, tocaria para as pessoas erradas.
+		if !flag("local") && a.talker() != api.c {
+			return nil, errScriptSoundElsewhere
 		}
 		return nil, a.scriptPlaySound(str("name"), flag("local"))
 	case "stopSound":
@@ -520,20 +525,20 @@ func (api *API) ScriptCall(id, action string, args map[string]any) (any, error) 
 		}
 		return nil, nil
 	case "switchChannel":
-		if !a.client.IsConnected() {
+		if !api.c.client.IsConnected() {
 			return nil, errors.New("não conectado")
 		}
 		id := num("channelId")
-		if ch := scriptChannel(id, a.client.Snapshot()); ch == nil || ch.Name == "" {
+		if ch := scriptChannel(id, api.c.client.Snapshot()); ch == nil || ch.Name == "" {
 			return nil, errors.New("canal não encontrado")
 		}
-		a.client.JoinChannel(id, str("password"))
+		api.c.client.JoinChannel(id, str("password"))
 		return nil, nil
 
 	case "getSelf":
-		return a.scriptSelf(), nil
+		return api.c.scriptSelf(), nil
 	case "getClients":
-		snap := a.client.Snapshot()
+		snap := api.c.client.Snapshot()
 		out := make([]*ScriptClient, 0, len(snap.Clients))
 		if snap.Connected {
 			for _, cl := range snap.Clients {
@@ -542,7 +547,7 @@ func (api *API) ScriptCall(id, action string, args map[string]any) (any, error) 
 		}
 		return out, nil
 	case "getChannels":
-		snap := a.client.Snapshot()
+		snap := api.c.client.Snapshot()
 		out := make([]ScriptChannel, 0, len(snap.Channels))
 		if snap.Connected {
 			for _, oc := range snap.Channels {
@@ -564,17 +569,17 @@ func (api *API) ScriptCall(id, action string, args map[string]any) (any, error) 
 
 // scriptTalk envia uma mensagem ou cutucada de script, se o texto for válido,
 // houver conexão e o limite contra flood permitir.
-func (a *App) scriptTalk(send func(), text string, maxRunes int) error {
+func (c *conn) scriptTalk(send func(), text string, maxRunes int) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("mensagem vazia")
 	}
 	if utf8.RuneCountInString(text) > maxRunes {
 		return fmt.Errorf("mensagem longa demais (máximo %d caracteres)", maxRunes)
 	}
-	if !a.client.IsConnected() {
+	if !c.client.IsConnected() {
 		return errors.New("não conectado")
 	}
-	if !a.scripts.allowTalk(time.Now()) {
+	if !c.allowScriptTalk(time.Now()) {
 		return errScriptFlood
 	}
 	send()
@@ -582,8 +587,9 @@ func (a *App) scriptTalk(send func(), text string, maxRunes int) error {
 }
 
 var (
-	errScriptUnmute     = errors.New("por segurança, um script não liga o microfone nem os alto-falantes: ele só pode mutar; quem desmuta é você")
-	errScriptSoundFlood = fmt.Errorf("muitos sons em pouco tempo: os scripts podem tocar %d seguidos e depois um a cada %d s",
+	errScriptSoundElsewhere = errors.New("o microfone está em outro servidor: daqui o som não chegaria a este canal (use ts.playSoundLocal para ouvir só você)")
+	errScriptUnmute         = errors.New("por segurança, um script não liga o microfone nem os alto-falantes: ele só pode mutar; quem desmuta é você")
+	errScriptSoundFlood     = fmt.Errorf("muitos sons em pouco tempo: os scripts podem tocar %d seguidos e depois um a cada %d s",
 		scriptSoundBurst, int(scriptSoundEvery/time.Second))
 )
 
@@ -607,20 +613,20 @@ func reasonNote(reason string) func() string {
 // servidor e o limite contra flood permite. O que foi feito fica no registro
 // do servidor: done é a frase, com %s no lugar do apelido do alvo, e note um
 // complemento opcional (texto livre, que não passa por formatação).
-func (a *App) scriptModerate(sc ScriptDTO, clientID int, done string, note func() string, act func(target uint16) error) error {
+func (c *conn) scriptModerate(sc ScriptDTO, clientID int, done string, note func() string, act func(target uint16) error) error {
 	if !sc.Moderation {
 		return errors.New(`este script não tem permissão para moderar: marque "Pode moderar" nele, na janela de scripts`)
 	}
-	if _, err := a.scriptTarget(clientID); err != nil {
+	if _, err := c.scriptTarget(clientID); err != nil {
 		return err
 	}
 	nick := ""
-	for _, cl := range a.client.Snapshot().Clients {
+	for _, cl := range c.client.Snapshot().Clients {
 		if int(cl.ID) == clientID {
 			nick = cl.Nickname
 		}
 	}
-	if !a.scripts.allowTalk(time.Now()) {
+	if !c.allowScriptTalk(time.Now()) {
 		return errScriptFlood
 	}
 	if err := act(uint16(clientID)); err != nil {
@@ -632,17 +638,17 @@ func (a *App) scriptModerate(sc ScriptDTO, clientID int, done string, note func(
 			line += " " + extra
 		}
 	}
-	a.addLog("warn", line)
+	c.addLog("warn", line)
 	return nil
 }
 
 // scriptTarget confere que o destino de uma mensagem privada ou cutucada é um
 // cliente que está no servidor (e não nós mesmos).
-func (a *App) scriptTarget(id int) (int, error) {
-	if !a.client.IsConnected() {
+func (c *conn) scriptTarget(id int) (int, error) {
+	if !c.client.IsConnected() {
 		return 0, errors.New("não conectado")
 	}
-	snap := a.client.Snapshot()
+	snap := c.client.Snapshot()
 	for _, cl := range snap.Clients {
 		if int(cl.ID) == id && cl.ID != snap.SelfID {
 			return id, nil
@@ -691,12 +697,12 @@ func (a *App) scriptPlaySound(name string, local bool) error {
 	return nil
 }
 
-func (a *App) scriptSelf() ScriptSelf {
-	snap := a.client.Snapshot()
-	a.mu.Lock()
-	out := ScriptSelf{Away: a.away, AwayMessage: a.awayMessage}
-	a.mu.Unlock()
-	out.Muted, out.Deafened = a.engine.Muted(), a.engine.Deafened()
+func (c *conn) scriptSelf() ScriptSelf {
+	snap := c.client.Snapshot()
+	c.app.mu.Lock()
+	out := ScriptSelf{Away: c.app.away, AwayMessage: c.app.awayMessage}
+	c.app.mu.Unlock()
+	out.Muted, out.Deafened = c.app.engine.Muted(), c.app.engine.Deafened()
 	if !snap.Connected {
 		return out
 	}

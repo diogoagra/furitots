@@ -7,7 +7,7 @@
   "wailsjsdir": "./build/wailsjs",
   "info": {
     "productName": "Furito TS",
-    "productVersion": "1.0.1",
+    "productVersion": "1.1.0",
     "comments": "Cliente de voz compatível com servidores TeamSpeak 3 e TeamSpeak 6 — https://diogoagra.dev",
     "companyName": "Diogo Agra",
     "copyright": "© Diogo Agra"
