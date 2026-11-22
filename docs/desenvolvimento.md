@@ -13,7 +13,7 @@ ajudam a mexer nele sem um servidor de verdade por perto.
 | `audio/rnnoise/` | O RNNoise 0.2 (código C da Xiph.Org, licença BSD, sem alterações) e a ligação com o Go; a origem e o que é do projeto estão em [`ORIGEM.md`](../audio/rnnoise/ORIGEM.md) |
 | `hotkey/` | Atalhos globais de teclado (macOS e Windows) |
 | `screencap/` | Captura de tela para o compartilhamento (ScreenCaptureKit no macOS) e um padrão de teste |
-| `backend/` | Liga protocolo e áudio e expõe a API e os eventos que a interface usa: estado, identidades, favoritos, avisos sonoros (sintetizados em `builtinsounds.go`), scripts, gravação, compartilhamento de tela |
+| `backend/` | Liga protocolo e áudio e expõe a API e os eventos que a interface usa: estado, identidades, favoritos, avisos sonoros (sintetizados em `builtinsounds.go`), scripts, gravação, compartilhamento de tela. Cada servidor conectado (cada aba) é uma `conn` (`conn.go`, `tabs.go`); a janela chega à API por `Bridge.Call(aba, método, argumentos)` (`bridge.go`), para um pedido nunca ir parar no servidor de outra aba |
 | `frontend/` | A interface, em HTML/CSS/JS puro (sem etapa de build). `bridge.js` fala com o backend ou, com `?mock`, com um backend simulado; `screen.js` é o compartilhamento de tela (WebRTC); `scripts.js` e `script-worker.js` rodam os scripts do usuário |
 | `cmd/audiodemo/` | Gera WAVs para ouvir, fora do app, cada voz e o que seria transmitido com cada supressão de ruído |
 | `main.go`, `startup.go`, `fatal_*.go` | Janela e menus (Wails), registro de inicialização e erros fatais |
@@ -68,6 +68,16 @@ FURITO_ICON_TEST_HOST=host:porta FURITO_ICON_TEST_TOKEN=chave FURITO_TEST_CONTAI
   go test ./backend/ -run LiveAdmin -v
 ```
 
+O teste de vários servidores ao mesmo tempo precisa de dois servidores
+diferentes (um segundo contêiner, em outra porta):
+
+```sh
+docker run -d --name ts-b -e TSSERVER_LICENSE_ACCEPTED=accept \
+  -p 9988:9987/udp teamspeaksystems/teamspeak6-server:latest
+FURITO_TABS_HOST_A=127.0.0.1:9987 FURITO_TABS_HOST_B=127.0.0.1:9988 \
+  go test ./backend/ -run LiveTwoServers -v
+```
+
 As avaliações de áudio (detector de voz, supressão de ruído, vozes) pedem
 gravações de fala e estão descritas em [audio.md](audio.md#medir).
 
@@ -82,6 +92,7 @@ gravações de fala e estão descritas em [audio.md](audio.md#medir).
 | `FURITO_DEV_JS=arquivo.js` | Executa o script na janela ao abrir (só em app compilado com `devhooks`, ver abaixo) |
 | `FURITO_DEV_QUIT_AFTER=N` | Fecha o app depois de N segundos (idem) |
 | `FURITO_TEST_HOST=host:porta` | Servidor usado pelos testes ao vivo |
+| `FURITO_TABS_HOST_A`, `FURITO_TABS_HOST_B` | Dois servidores diferentes, para o teste de várias conexões |
 | `FURITO_SPEECH=a.wav,b.wav` | Gravações de fala para as avaliações de áudio |
 | `FURITO_EVAL=1` | Liga a avaliação do detector de voz contra o teclado |
 | `FURITO_SIGN_PFX`, `FURITO_SIGN_PASS`, `FURITO_SIGN_CERT`, `FURITO_SIGN_KEY`, `FURITO_SIGN_TIMESTAMP` | Certificado para assinar o executável do Windows (ver [windows.md](windows.md)) |

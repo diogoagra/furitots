@@ -5,6 +5,12 @@ não veem nem recebem nada). Botão do monitor na barra de ferramentas para
 compartilhar; quem está compartilhando ganha um ícone de monitor na árvore —
 clique nele (ou botão direito → "Assistir à tela") para abrir o vídeo.
 
+Com vários servidores abertos, a transmissão é do servidor (da aba) em que
+começou: você continua compartilhando enquanto olha outra aba, e o indicador
+da barra de estado segue à vista. Assistir é diferente: o vídeo é mostrado na
+aba de quem compartilha, então sair dela para de assistir. Só há uma
+transmissão sua por vez.
+
 Como funciona:
 
 - O servidor TeamSpeak não transporta vídeo. Os clientes combinam a

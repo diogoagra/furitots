@@ -35,7 +35,8 @@ total fixo, que derruba transferências demoradas. O plano, em etapas:
   formatação.
 - Links `ts3server://` e convites.
 - Ícone na barra de menus/bandeja e modo compacto.
-- Várias conexões em abas.
+- Abas de servidores: reabrir as do último uso ao iniciar; mutar e ausente
+  por servidor.
 - Instalador para Windows, app do macOS assinado e atualização automática.
 - Assistente de áudio na primeira abertura.
 - Scripts: dados guardados entre execuções, mais eventos, importar e exportar.

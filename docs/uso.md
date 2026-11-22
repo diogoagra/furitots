@@ -46,6 +46,45 @@ As janelas internas (Ajustes, Favoritos, cutucada, permissões…) são painéis
 dentro da janela do app: arrastam pelo título, sempre cabem na janela (o miolo
 rola; título e botões ficam à vista) e voltam ao centro a cada abertura.
 
+## Vários servidores ao mesmo tempo
+
+Cada servidor fica numa aba. A barra de abas aparece quando há duas ou mais.
+
+![Dois servidores em abas: o da esquerda tem o microfone e uma mensagem não lida](img/abas.png)
+
+- **Abrir:** na janela de conexão, marque "Em nova aba" (ou Conexões →
+  Conectar em nova aba…, Cmd/Ctrl+T); nos favoritos, "Conectar em nova aba".
+  Sem isso, conectar troca o servidor da aba atual, como sempre foi. Uma aba
+  desconectada é reaproveitada, para não sobrar aba vazia.
+- **Trocar:** clique na aba, Ctrl+Tab e Ctrl+Shift+Tab, Cmd/Ctrl+1…9, ou
+  Conexões → Próxima aba / Aba anterior. Cada aba guarda a sua seleção, o seu
+  bate-papo e o rascunho da mensagem.
+- **Fechar a aba** (o × dela, clique do meio, ou Conexões → Fechar aba) sai
+  daquele servidor, pedindo confirmação se você está conectado. A última aba
+  não some: fica desconectada.
+- **Ouvir:** todas as abas tocam ao mesmo tempo. "Silenciar este servidor", no
+  menu da aba, cala um servidor sem sair dele; ele mostra você com os
+  alto-falantes mutados.
+- **Falar:** em um servidor por vez, o da aba com o ícone do microfone. A
+  primeira conexão fica com o microfone e uma aba nova não o toma: para falar
+  em outro servidor, clique no microfone esmaecido da aba dele (ou "Falar
+  neste servidor", no menu da aba). Nos
+  servidores em que você não fala, os outros veem o seu microfone como
+  desativado. Se você sair do servidor em que falava, o microfone só muda
+  sozinho quando sobra um único servidor; com dois ou mais, a barra de estado
+  avisa e a escolha é sua — assim a sua voz nunca vai para um servidor que
+  você não escolheu. O soundboard e o apertar para falar acompanham o
+  microfone.
+- **Mutar o microfone, mutar os alto-falantes e ausente** valem para todos os
+  servidores de uma vez.
+- **Avisos sonoros:** a aba à vista toca todos. Das outras só toca o que é com
+  você: cutucada, ser movido, expulso ou banido, a conexão cair ou voltar.
+- **Mensagens:** o que chega no bate-papo de uma aba fora da vista aparece
+  como contador na aba.
+- **De cada aba:** identidade, reconexão automática, histórico, sussurro,
+  gravação da conversa (uma por vez; grava as vozes daquele servidor e a sua
+  enquanto você fala nele) e compartilhamento de tela.
+
 ## Ícones, avatares e descrições
 
 - Os ícones à direita do apelido (grupo do canal, grupos do servidor, ícone do
