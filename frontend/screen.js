@@ -16,8 +16,13 @@
  *   leave    {sid}      espectador saiu
  *   full     {sid}      limite de espectadores atingido
  *
- * Uso:  FuritoScreen.init({ call, getState, notify, changed })
- *       FuritoScreen.onState(state) a cada estado; FuritoScreen.onSignal(msg) a cada evento.
+ * Com vários servidores abertos (um por aba), a transmissão pertence à aba em
+ * que começou: quem compartilha continua compartilhando ao olhar outra aba
+ * (o estado da aba da transmissão passa a ser consultado de tempos em tempos);
+ * quem assiste para de assistir ao sair da aba, porque o vídeo é mostrado nela.
+ *
+ * Uso:  FuritoScreen.init({ call, forTab, getState, notify, changed })
+ *       FuritoScreen.onState(state) a cada estado da aba à vista; FuritoScreen.onSignal(msg) a cada evento.
  */
 (function () {
   'use strict';
@@ -31,21 +36,39 @@
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
-  let deps = null;
-  const sharers = new Map(); // id do cliente → { sid, name }
-  let share = null;          // { sid, source, track, viewers: Map(id → { pc, state }), quality, fps }
-  let watch = null;          // { from, name, sid, pc, state, timer }
-  let videoEl = null;
-  let lastChannel = 0;
-  let lastConnected = false;
-  let helloTimer = 0;
+  const POLL_MS = 1500; // de quanto em quanto tempo se consulta a aba da transmissão quando ela não está à vista
 
-  const state = () => deps.getState();
+  let deps = null;
+  // O que se sabe de cada aba: aba → { st (o último estado visto), sharers: Map(id do cliente → { sid, name }),
+  // lastChannel, lastConnected, helloTimer, rehello }
+  const tabs = new Map();
+  let viewTab = 0;           // a aba à vista
+  let share = null;          // { tab, sid, source, track, viewers: Map(id → { pc, state }), quality, fps }
+  let watch = null;          // { tab, from, name, sid, pc, state, timer }
+  let videoEl = null;
+  let pollTimer = 0;
+
+  const state = () => deps.getState(); // o estado da aba à vista
   const changed = () => { if (deps && deps.changed) deps.changed(); };
   const errText = (e) => (e && (e.message || e.error)) || String(e || 'erro desconhecido');
 
-  function send(to, msg) {
-    return deps.call('ScreenSend', to, JSON.stringify(msg)).catch((e) => { deps.notify('error', 'Compartilhamento de tela: ' + errText(e)); throw e; });
+  function ctx(tab) {
+    let c = tabs.get(tab);
+    if (!c) { c = { st: null, sharers: new Map(), lastChannel: 0, lastConnected: false, helloTimer: 0, rehello: false }; tabs.set(tab, c); }
+    return c;
+  }
+  // tabState devolve o último estado visto de uma aba (o de "desconectado" se não se sabe nada dela).
+  const tabState = (tab) => (tabs.get(tab) && tabs.get(tab).st) || { status: 'disconnected', self: { clientId: 0, channelId: 0 }, clients: [] };
+  // fresh: só se confia no estado da aba à vista e no da aba da transmissão (que é consultada).
+  const fresh = (tab) => tab === viewTab || (!!share && share.tab === tab);
+
+  // callTab chama o backend numa aba específica (sem forTab, só existe a aba atual).
+  function callTab(tab, name, ...args) {
+    return deps.forTab ? Promise.resolve(deps.forTab(tab)[name](...args)) : deps.call(name, ...args);
+  }
+
+  function send(tab, to, msg) {
+    return callTab(tab, 'ScreenSend', to, JSON.stringify(msg)).catch((e) => { deps.notify('error', 'Compartilhamento de tela: ' + errText(e)); throw e; });
   }
 
   function rtcConfig() {
@@ -176,7 +199,8 @@
   async function start(opts) {
     opts = opts || {};
     if (share) return;
-    if (state().status !== 'connected') throw new Error('conecte-se a um servidor para compartilhar a tela');
+    const tab = viewTab; // a transmissão é desta aba, mesmo que a pessoa troque de aba enquanto escolhe a tela
+    if (tabState(tab).status !== 'connected') throw new Error('conecte-se a um servidor para compartilhar a tela');
     const quality = QUALITIES[opts.quality] ? Number(opts.quality) : 1080;
     const q = QUALITIES[quality];
     const fps = clamp(Number(opts.fps) || 15, 1, 30);
@@ -184,11 +208,12 @@
     const track = source.stream.getVideoTracks()[0];
     if (!track) { source.stop(); throw new Error('a captura não entregou vídeo'); }
     try { track.contentHint = 'detail'; } catch (e) { /* opcional */ }
-    if (state().status !== 'connected') { source.stop(); throw new Error('a conexão caiu antes de a captura começar'); }
-    share = { sid: newId(), source, track, viewers: new Map(), quality, fps };
+    if (tabState(tab).status !== 'connected') { source.stop(); throw new Error('a conexão caiu antes de a captura começar'); }
+    share = { tab, sid: newId(), source, track, viewers: new Map(), quality, fps };
     source.onended = (why) => { if (why) deps.notify('error', 'Compartilhamento de tela: ' + why); stop(); };
     changed();
-    await send(0, { t: 'sharing', sid: share.sid }).catch(() => {});
+    pollShareTab();
+    await send(tab, 0, { t: 'sharing', sid: share.sid }).catch(() => {});
     deps.notify('info', 'Você está compartilhando a tela com o canal.');
   }
 
@@ -208,8 +233,25 @@
     s.viewers.clear();
     s.source.onended = null;
     s.source.stop();
-    if (!silent && state().status === 'connected') send(0, { t: 'stopped', sid: s.sid }).catch(() => {});
+    clearInterval(pollTimer); pollTimer = 0;
+    if (!silent && tabState(s.tab).status === 'connected') send(s.tab, 0, { t: 'stopped', sid: s.sid }).catch(() => {});
     changed();
+  }
+
+  // Com a aba da transmissão fora da vista, o estado dela deixa de chegar
+  // sozinho: é consultado, para a transmissão acabar se a conexão cair ou
+  // sairmos do canal, e para tirar os espectadores que foram embora.
+  function pollShareTab() {
+    const wanted = !!share && share.tab !== viewTab;
+    if (!wanted) { clearInterval(pollTimer); pollTimer = 0; return; }
+    if (pollTimer) return;
+    pollTimer = setInterval(() => {
+      const s = share;
+      if (!s || s.tab === viewTab) { clearInterval(pollTimer); pollTimer = 0; return; }
+      callTab(s.tab, 'GetState').then(
+        (st) => { if (share === s && s.tab !== viewTab && st) process(s.tab, st); },
+        () => { if (share === s) { stop(true); deps.notify('info', 'O compartilhamento de tela foi encerrado: a aba em que ele estava foi fechada.'); } });
+    }, POLL_MS);
   }
 
   // Respostas automáticas à sinalização de outros clientes. Qualquer um no
@@ -220,8 +262,8 @@
   const REPLY_WINDOW = 10000, REPLY_MAX = 12; // e no total, por janela de tempo
   const lastReply = new Map();
   let replyTimes = [];
-  function mayReply(from, kind) { // o ritmo é por cliente e por tipo de pedido (perguntar e assistir não se atrapalham)
-    const now = Date.now(), key = kind + ':' + from;
+  function mayReply(tab, from, kind) { // o ritmo é por cliente e por tipo de pedido (perguntar e assistir não se atrapalham)
+    const now = Date.now(), key = kind + ':' + tab + ':' + from;
     if (now - (lastReply.get(key) || 0) < REPLY_GAP) return false;
     replyTimes = replyTimes.filter((t) => now - t < REPLY_WINDOW);
     if (replyTimes.length >= REPLY_MAX) return false;
@@ -231,12 +273,12 @@
     return true;
   }
 
-  async function onWatch(from, msg) {
-    if (!share) return; // não estamos compartilhando: nada a responder
-    if (!mayReply(from, 'watch')) return;
-    if (msg.sid !== share.sid) { send(from, { t: 'stopped', sid: msg.sid || '' }).catch(() => {}); return; }
+  async function onWatch(tab, from, msg) {
+    if (!share || share.tab !== tab) return; // não estamos compartilhando neste servidor: nada a responder
+    if (!mayReply(tab, from, 'watch')) return;
+    if (msg.sid !== share.sid) { send(tab, from, { t: 'stopped', sid: msg.sid || '' }).catch(() => {}); return; }
     if (share.viewers.has(from)) dropViewer(from); // pediu de novo: recomeça
-    if (share.viewers.size >= MAX_VIEWERS) { send(from, { t: 'full', sid: share.sid }).catch(() => {}); return; }
+    if (share.viewers.size >= MAX_VIEWERS) { send(tab, from, { t: 'full', sid: share.sid }).catch(() => {}); return; }
     const s = share;
     const pc = new RTCPeerConnection(rtcConfig());
     const viewer = { pc, state: 'connecting' };
@@ -260,7 +302,7 @@
       } catch (e) { /* limites são opcionais */ }
       await gathered(pc, 2500);
       if (share !== s || s.viewers.get(from) !== viewer) return;
-      await send(from, { t: 'offer', sid: s.sid, sdp: pc.localDescription.sdp });
+      await send(tab, from, { t: 'offer', sid: s.sid, sdp: pc.localDescription.sdp });
     } catch (e) {
       if (share === s && s.viewers.get(from) === viewer) dropViewer(from);
     }
@@ -287,27 +329,28 @@
     clearTimeout(w.timer);
     if (w.pc) { try { w.pc.close(); } catch (e) { /* já fechada */ } }
     showStream(null);
-    if (!quiet && state().status === 'connected') send(w.from, { t: 'leave', sid: w.sid }).catch(() => {});
+    if (!quiet && tabState(w.tab).status === 'connected') send(w.tab, w.from, { t: 'leave', sid: w.sid }).catch(() => {});
     if (reason) deps.notify('info', reason);
     changed();
   }
 
   async function watchClient(id) {
     id = Number(id);
-    const s = sharers.get(id);
+    const tab = viewTab;
+    const s = ctx(tab).sharers.get(id);
     if (!s) throw new Error('este cliente não está compartilhando a tela');
-    if (watch && watch.from === id) return;
+    if (watch && watch.tab === tab && watch.from === id) return;
     if (watch) stopWatching('');
-    const w = { from: id, name: s.name, sid: s.sid, pc: null, state: 'asking', timer: 0 };
+    const w = { tab, from: id, name: s.name, sid: s.sid, pc: null, state: 'asking', timer: 0 };
     watch = w;
     w.timer = setTimeout(() => { if (watch === w && w.state !== 'live') stopWatching('Não foi possível conectar à tela de ' + w.name + '.'); }, 20000);
     changed();
-    try { await send(id, { t: 'watch', sid: s.sid }); } catch (e) { if (watch === w) stopWatching('', true); throw e; }
+    try { await send(tab, id, { t: 'watch', sid: s.sid }); } catch (e) { if (watch === w) stopWatching('', true); throw e; }
   }
 
-  async function onOffer(from, msg) {
+  async function onOffer(tab, from, msg) {
     const w = watch;
-    if (!w || w.from !== from || msg.sid !== w.sid || typeof msg.sdp !== 'string') return;
+    if (!w || w.tab !== tab || w.from !== from || msg.sid !== w.sid || typeof msg.sdp !== 'string') return;
     if (w.pc) { try { w.pc.close(); } catch (e) { /* já fechada */ } }
     const pc = new RTCPeerConnection(rtcConfig());
     w.pc = pc;
@@ -328,7 +371,7 @@
       await pc.setLocalDescription(answer);
       await gathered(pc, 2500);
       if (watch !== w || w.pc !== pc) return;
-      await send(from, { t: 'answer', sid: w.sid, sdp: pc.localDescription.sdp });
+      await send(tab, from, { t: 'answer', sid: w.sid, sdp: pc.localDescription.sdp });
     } catch (e) {
       if (watch === w) stopWatching('Não foi possível abrir a tela de ' + w.name + ': ' + errText(e), true);
     }
@@ -339,72 +382,100 @@
   function onSignal(sig) {
     if (!deps || !sig) return;
     const from = Number(sig.from);
+    const tab = Number(sig.tab) || viewTab;
+    // De uma aba que não está à vista nem transmitindo não se sabe quem está
+    // no canal: a mensagem é ignorada. Ao voltar a ela, perguntamos de novo.
+    if (!fresh(tab)) return;
     let msg;
     try { msg = JSON.parse(sig.payload); } catch (e) { return; }
     if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
-    const st = state();
+    const c = ctx(tab), st = tabState(tab);
     if (st.status !== 'connected' || from === st.self.clientId) return;
-    const cl = (st.clients || []).find((c) => c.id === from);
+    const cl = (st.clients || []).find((x) => x.id === from);
     if (!cl || cl.channelId !== st.self.channelId) return; // só vale entre quem está no mesmo canal
     const sid = typeof msg.sid === 'string' ? msg.sid.slice(0, 40) : '';
+    const watchingHim = !!watch && watch.tab === tab && watch.from === from;
+    const sharingHere = !!share && share.tab === tab;
     switch (msg.t) {
       case 'hello':
-        if (share && mayReply(from, 'hello')) send(from, { t: 'sharing', sid: share.sid }).catch(() => {});
+        if (sharingHere && mayReply(tab, from, 'hello')) send(tab, from, { t: 'sharing', sid: share.sid }).catch(() => {});
         break;
       case 'sharing':
         if (!sid) break;
-        if (watch && watch.from === from && watch.sid !== sid) stopWatching(cl.nickname + ' reiniciou o compartilhamento.', true);
-        sharers.set(from, { sid, name: cl.nickname });
+        if (watchingHim && watch.sid !== sid) stopWatching(cl.nickname + ' reiniciou o compartilhamento.', true);
+        c.sharers.set(from, { sid, name: cl.nickname });
         changed();
         break;
       case 'stopped':
-        if (sharers.delete(from)) changed();
-        if (watch && watch.from === from) stopWatching(cl.nickname + ' parou de compartilhar a tela.', true);
+        if (c.sharers.delete(from)) changed();
+        if (watchingHim) stopWatching(cl.nickname + ' parou de compartilhar a tela.', true);
         break;
       case 'full':
-        if (watch && watch.from === from) stopWatching('A tela de ' + cl.nickname + ' já está com o máximo de espectadores.', true);
+        if (watchingHim) stopWatching('A tela de ' + cl.nickname + ' já está com o máximo de espectadores.', true);
         break;
-      case 'watch': onWatch(from, { sid }); break;
-      case 'offer': onOffer(from, { sid, sdp: msg.sdp }); break;
-      case 'answer': onAnswer(from, { sid, sdp: msg.sdp }); break;
-      case 'leave': dropViewer(from); break;
+      case 'watch': onWatch(tab, from, { sid }); break;
+      case 'offer': onOffer(tab, from, { sid, sdp: msg.sdp }); break;
+      case 'answer': if (sharingHere) onAnswer(from, { sid, sdp: msg.sdp }); break;
+      case 'leave': if (sharingHere) dropViewer(from); break;
       default: break;
     }
   }
 
+  // onState recebe cada estado da aba à vista.
   function onState(st) {
-    if (!deps) return;
+    if (!deps || !st) return;
+    const tab = Number(st.tab) || 0;
+    if (tab !== viewTab) {
+      // Trocou de aba. Quem assistia para (o vídeo é mostrado na aba que ficou
+      // para trás). Na aba que volta à vista, o que se sabia de quem
+      // compartilha pode ter mudado enquanto ninguém olhava: pergunta de novo.
+      if (watch) stopWatching('Você saiu da aba em que assistia à tela de ' + watch.name + '.');
+      viewTab = tab;
+      const c = ctx(tab);
+      if (c.lastConnected && !(share && share.tab === tab)) { c.sharers.clear(); c.rehello = true; }
+    }
+    process(tab, st);
+    pollShareTab();
+  }
+
+  // process aplica um estado (da aba à vista, ou o consultado da aba da transmissão).
+  function process(tab, st) {
+    const c = ctx(tab);
+    c.st = st;
+    const mine = !!share && share.tab === tab, seeing = !!watch && watch.tab === tab;
     const connected = st.status === 'connected';
     const channel = connected ? st.self.channelId : 0;
     if (!connected) {
-      if (share) stop(true);
-      if (watch) stopWatching('', true);
-      if (sharers.size) { sharers.clear(); changed(); }
-    } else if (channel !== lastChannel && lastChannel !== 0) {
+      if (mine) stop(true);
+      if (seeing) stopWatching('', true);
+      if (c.sharers.size) { c.sharers.clear(); changed(); }
+    } else if (channel !== c.lastChannel && c.lastChannel !== 0) {
       // trocou de canal: a transmissão é do canal
-      if (share) { stop(true); deps.notify('info', 'O compartilhamento de tela foi encerrado: você saiu do canal.'); }
-      if (watch) stopWatching('', true);
-      if (sharers.size) { sharers.clear(); changed(); }
+      if (mine) { stop(true); deps.notify('info', 'O compartilhamento de tela foi encerrado: você saiu do canal.'); }
+      if (seeing) stopWatching('', true);
+      if (c.sharers.size) { c.sharers.clear(); changed(); }
     }
     if (connected) {
-      const here = new Set((st.clients || []).filter((c) => c.channelId === channel).map((c) => c.id));
-      for (const id of Array.from(sharers.keys())) if (!here.has(id)) { sharers.delete(id); changed(); }
-      if (watch && !here.has(watch.from)) stopWatching(watch.name + ' saiu do canal.', true);
-      if (share) for (const id of Array.from(share.viewers.keys())) if (!here.has(id)) dropViewer(id);
-      // ao entrar num canal, pergunta se alguém está compartilhando — só se
-      // houver outro cliente Furito ali, para não gastar comandos à toa
-      if (channel && (channel !== lastChannel || !lastConnected)) {
-        clearTimeout(helloTimer);
-        helloTimer = setTimeout(() => {
-          const now = state();
-          if (now.status !== 'connected' || now.self.channelId !== channel) return;
-          const peers = (now.clients || []).some((c) => c.channelId === channel && c.id !== now.self.clientId && c.furito);
-          if (peers) send(0, { t: 'hello' }).catch(() => {});
+      const here = new Set((st.clients || []).filter((x) => x.channelId === channel).map((x) => x.id));
+      for (const id of Array.from(c.sharers.keys())) if (!here.has(id)) { c.sharers.delete(id); changed(); }
+      if (watch && watch.tab === tab && !here.has(watch.from)) stopWatching(watch.name + ' saiu do canal.', true);
+      if (share && share.tab === tab) for (const id of Array.from(share.viewers.keys())) if (!here.has(id)) dropViewer(id);
+      // ao entrar num canal (ou voltar à aba), pergunta se alguém está
+      // compartilhando — só se houver outro cliente Furito ali, para não
+      // gastar comandos à toa
+      if (channel && (channel !== c.lastChannel || !c.lastConnected || c.rehello)) {
+        clearTimeout(c.helloTimer);
+        c.helloTimer = setTimeout(() => {
+          const now = tabState(tab);
+          if (!fresh(tab) || now.status !== 'connected' || now.self.channelId !== channel) return;
+          const peers = (now.clients || []).some((x) => x.channelId === channel && x.id !== now.self.clientId && x.furito);
+          if (peers) send(tab, 0, { t: 'hello' }).catch(() => {});
         }, 600);
       }
     }
-    lastChannel = channel;
-    lastConnected = connected;
+    c.rehello = false;
+    c.lastChannel = channel;
+    c.lastConnected = connected;
   }
 
   window.FuritoScreen = {
@@ -418,8 +489,10 @@
     stop: () => stop(false),
     watch: watchClient,
     stopWatching: () => stopWatching('', false),
-    isSharer: (id) => sharers.has(Number(id)),
-    sharing: () => (share ? { viewers: share.viewers.size, live: Array.from(share.viewers.values()).filter((v) => v.state === 'live').length, frames: share.source.frames, quality: share.quality, fps: share.fps } : null),
+    // isSharer: o cliente id, da aba à vista, está compartilhando a tela?
+    isSharer: (id) => ctx(viewTab).sharers.has(Number(id)),
+    // sharing: a nossa transmissão (tab = a aba em que ela está; here = é a aba à vista).
+    sharing: () => (share ? { tab: share.tab, here: share.tab === viewTab, viewers: share.viewers.size, live: Array.from(share.viewers.values()).filter((v) => v.state === 'live').length, frames: share.source.frames, quality: share.quality, fps: share.fps } : null),
     watching: () => (watch ? { from: watch.from, name: watch.name, state: watch.state } : null),
   };
 })();

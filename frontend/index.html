@@ -79,6 +79,9 @@
 
   <div id="banner" class="banner" hidden></div>
 
+  <!-- Abas de servidores: aparecem com duas conexões ou mais -->
+  <div id="serverTabs" class="stabs" role="tablist" aria-label="Servidores conectados" hidden></div>
+
   <div class="main">
     <div class="top-split" id="topSplit">
       <section class="pane tree-pane" id="treePane">
@@ -118,7 +121,8 @@
   <!-- Barra de status -->
   <footer class="statusbar">
     <div class="sb-left">
-      <span id="txIndicator" class="tx" hidden><span class="tx-dot"></span>Transmitindo</span>
+      <span id="txIndicator" class="tx" hidden><span class="tx-dot"></span><span id="txText">Transmitindo</span></span>
+      <button id="micWhere" class="mic-where" type="button" hidden></button>
       <button id="whisperIndicator" class="whisper" title="Clique para parar de sussurrar" hidden></button>
       <button id="screenIndicator" class="whisper screen" title="Clique para parar de compartilhar a tela" hidden></button>
       <span id="mockBadge" class="mock-badge" hidden>modo demonstração</span>
@@ -238,6 +242,7 @@
       <span class="dlg-error" id="connectError"></span>
     </div>
     <div class="dlg-foot">
+      <label class="check foot-opt" id="cNewTabRow" hidden><input type="checkbox" id="cNewTab"> Em nova aba</label>
       <button class="btn" id="connectCancel" type="button">Cancelar</button>
       <button class="btn primary" id="connectOk" type="submit" form="connectForm">Conectar</button>
     </div>

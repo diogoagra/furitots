@@ -97,6 +97,37 @@ input[type=range] { accent-color: var(--accent); margin: 0; }
 /* ---------- Aviso ---------- */
 .banner { flex: none; padding: 5px 12px; background: #fde8e8; color: #9b1c1c; border-bottom: 1px solid #f1b5b5; font-size: 12px; -webkit-user-select: text; user-select: text; }
 
+/* ---------- Abas de servidores ---------- */
+.stabs { flex: none; display: flex; align-items: flex-end; gap: 2px; height: 28px; padding: 3px 6px 0; overflow: hidden; background: #dedede; border-bottom: 1px solid var(--box-border); }
+.stab {
+  flex: 0 1 240px; min-width: 62px; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 5px 0 8px; margin-bottom: -1px;
+  border: 1px solid transparent; border-bottom: none; border-radius: 5px 5px 0 0; color: #333; background: none; white-space: nowrap;
+}
+.stab:hover { background: rgba(0,0,0,.06); }
+.stab.active { background: var(--bg); border-color: var(--box-border); color: #000; }
+.stab-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: #9a9aa2; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); }
+.stab.st-connected .stab-dot { background: radial-gradient(circle at 35% 30%, #b9f0bd, #2fae3a 60%, #1c7f26); }
+.stab.st-connecting .stab-dot, .stab.st-reconnecting .stab-dot { background: radial-gradient(circle at 35% 30%, #ffe9b0, #e79a14 60%, #b56f00); animation: rec-pulse 1.2s ease-in-out infinite; }
+.stab.talking .stab-dot { background: radial-gradient(circle at 35% 30%, #e9fbff, #39c6ff 55%, #0a8fe0); box-shadow: inset 0 0 0 1px rgba(0,95,170,.7), 0 0 6px 1px rgba(40,180,255,.95); }
+.stab-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.stab.unread .stab-label { font-weight: 700; }
+.stab.silenced .stab-label { color: var(--muted); }
+.stab .badge { flex: none; min-width: 16px; height: 15px; padding: 0 4px; border-radius: 8px; background: #e0242b; color: #fff; font-size: 10px; line-height: 15px; text-align: center; font-weight: 700; }
+.stab-mark, .stab-mic, .stab-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 3px; }
+.stab-mark .ic { width: 13px; height: 13px; color: #8a8a92; }
+.stab-mic .ic { width: 14px; height: 14px; color: #555; }
+.stab-mic:not(.on) { opacity: .28; }
+.stab-mic:not(.on):hover { opacity: 1; background: rgba(0,0,0,.14); }
+.stab-mic.on .ic { color: #1f6fd0; }
+.stab-mic.on.tx { background: rgba(43,181,255,.28); box-shadow: 0 0 5px 1px rgba(40,180,255,.8); }
+.stab-close { color: #777; }
+/* muitas abas: o nome ganha o lugar dos botões, que voltam ao passar o mouse (e ficam na aba à vista) */
+.stabs.many .stab-mic:not(.on) { display: none; }
+.stabs.many .stab:not(.active):not(:hover) .stab-close { display: none; }
+.stabs.many .stab:hover .stab-mic:not(.on) { display: inline-flex; }
+.stab-close .ic { width: 9px; height: 9px; }
+.stab-close:hover { background: rgba(0,0,0,.15); color: #000; }
+
 /* ---------- Área principal ---------- */
 .main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 6px 6px 0; }
 .top-split { flex: 1; min-height: 90px; display: flex; }
@@ -233,6 +264,12 @@ a.lnk:focus-visible { outline: 1px dotted currentColor; outline-offset: 1px; }
 .sb-error { color: var(--err); overflow: hidden; text-overflow: ellipsis; max-width: 52vw; }
 .tx { display: inline-flex; align-items: center; gap: 6px; color: #0a6fc4; font-size: 12px; }
 .tx-dot { width: 9px; height: 9px; border-radius: 50%; background: #2bb5ff; box-shadow: 0 0 5px 1px rgba(40,180,255,.9); }
+.mic-where { display: inline-flex; align-items: center; gap: 5px; max-width: 46vw; height: 18px; padding: 0 8px; border: 1px solid #c9c9cf; border-radius: 9px; background: #f4f4f6; color: #444; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mic-where .ic { width: 12px; height: 12px; }
+.mic-where.elsewhere { border-color: #e6cf8b; background: #fff3cd; color: #7a5b00; }
+.mic-where.elsewhere:hover { background: #ffe9a6; }
+.mic-where.none { border-color: #f1b5b5; background: #fde8e8; color: #9b1c1c; font-weight: 600; }
+.mic-where.none:hover { background: #fbd5d5; }
 .mock-badge { padding: 0 7px; border-radius: 8px; background: #fff3cd; border: 1px solid #e6cf8b; color: #7a5b00; font-size: 11px; line-height: 16px; }
 
 /* ---------- Popovers e menus ---------- */
@@ -386,6 +423,7 @@ a.lnk:focus-visible { outline: 1px dotted currentColor; outline-offset: 1px; }
 .dialog.mid.files { width: 610px; }
 .dlg-foot .btn { white-space: nowrap; }
 .dlg-foot .btn.push { margin-right: auto; }
+.dlg-foot .foot-opt { margin-right: auto; }
 .dlg-content { padding: 14px 18px 4px; }
 .dlg-form { display: grid; grid-template-columns: max-content 1fr; gap: 7px 10px; align-items: center; }
 .dlg-form.one { grid-template-columns: 1fr; }

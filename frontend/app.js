@@ -289,7 +289,7 @@
   // ------------------------------------------------------------------ estado
   function emptyState() {
     return {
-      tab: 0,
+      tab: 0, tabs: [],
       status: 'disconnected', error: '', host: '', reconnectAttempt: 0, autoReconnect: false,
       server: { name: '', welcomeMessage: '', version: '', platform: '', maxClients: 0, uid: '', bannerUrl: '', bannerLink: '' },
       self: { clientId: 0, channelId: 0, nickname: '', muted: false, deafened: false, away: false, awayMessage: '', talkRequested: false, recordingSince: 0, whisper: { kind: '', id: 0, name: '' } },
@@ -309,6 +309,16 @@
       audio: { effect: 'normal', effects: [], vadMode: 'auto', vadThreshold: 300, vadFloor: 0, noiseSuppression: true, noiseMode: 'neural', autoGain: true, echoCancellation: false, echoCancellationAvailable: true, normalizeVoices: true, micTest: false, micMode: '', outputVolume: 100, soundboardVolume: 80, soundboardPlaying: false, sounds: [], captureAvailable: true, inputDevice: '', outputDevice: '', notifySounds: true, notifyPack: '', notifyPacks: [], inputDevices: [], outputDevices: [], inputChoice: '', outputChoice: '' },
     };
   }
+  // Uma aba de servidor, como vem no resumo do backend (state.tabs e evento "tabs").
+  function normTab(t) {
+    t = t || {};
+    return {
+      id: Number(t.id) || 0, name: String(t.name || ''), host: String(t.host || ''),
+      status: /^(connecting|connected|reconnecting)$/.test(t.status) ? t.status : 'disconnected',
+      mic: !!t.mic, silenced: !!t.silenced, unread: Math.max(0, Number(t.unread) || 0),
+    };
+  }
+  const normTabs = (list) => (Array.isArray(list) ? list : []).map(normTab).filter((t) => t.id > 0);
   function normalize(s) {
     const d = emptyState();
     s = s || {};
@@ -324,6 +334,7 @@
     const groups = s.groups || {};
     return {
       tab: Number(s.tab) || 0,
+      tabs: normTabs(s.tabs),
       status: s.status || 'disconnected',
       error: s.error || '',
       host: s.host || '',
@@ -353,7 +364,7 @@
 
   let bridge = null, api = null;
   let state = emptyState();
-  let talking = { clients: [], self: false, micLevel: 0, voiceProb: 0 };
+  let talking = { clients: [], self: false, tx: false, micLevel: 0, voiceProb: 0 };
   let talkingSet = new Set();
   let selection = null;            // { type: 'server'|'channel'|'client', id }
   let userSelected = false;
@@ -475,7 +486,8 @@
   function clientIconsHtml(cl, isSelf, leftState, inMuted, outMuted) {
     let h = '';
     const scr = window.FuritoScreen;
-    if (isSelf && scr.sharing()) h += `<span class="sicon screen mine" title="Você está compartilhando a tela">${icon('screen')}</span>`;
+    const sh = isSelf ? scr.sharing() : null;
+    if (sh && sh.here !== false) h += `<span class="sicon screen mine" title="Você está compartilhando a tela">${icon('screen')}</span>`; // só na aba da transmissão
     else if (!isSelf && scr.isSharer(cl.id)) {
       const w = scr.watching();
       const mine = w && w.from === cl.id;
@@ -801,9 +813,10 @@
   const CHAT_BB = { images: 'link', max: 8 * 1024 };
   const MAX_PRIVATE_TABS = 40; // abas de conversa privada abertas ao mesmo tempo
   const seenIds = new Set();
+  let lastMsgId = 0; // a mensagem mais recente já posta no bate-papo da aba de servidor à vista
   function appendMessage(m, initial) {
     if (!m) return;
-    if (m.id > 0) { if (seenIds.has(m.id)) return; seenIds.add(m.id); }
+    if (m.id > 0) { if (seenIds.has(m.id)) return; seenIds.add(m.id); if (m.id > lastMsgId) lastMsgId = m.id; }
     let tab;
     if (m.targetMode === 1) tab = ensurePrivateTab(m.peerId, m.peerName || m.invokerName);
     else tab = tabs.get(m.targetMode === 2 ? 'channel' : 'server');
@@ -953,10 +966,16 @@
   function closeModal(el) { el.hidden = true; const i = openModals.indexOf(el); if (i !== -1) openModals.splice(i, 1); }
 
   // conectar
-  const conn = { open: false, submitting: false, requested: false, sawConnecting: false, error: '', timer: 0, prefilled: false };
+  const conn = { open: false, submitting: false, requested: false, sawConnecting: false, error: '', timer: 0, prefilled: false, newTab: 0 };
 
-  async function openConnectDialog() {
-    conn.open = true; conn.error = ''; conn.requested = false; conn.sawConnecting = false;
+  // opts.newTab: já vem marcado "Em nova aba" (menu Conexões → Nova aba).
+  async function openConnectDialog(opts) {
+    conn.open = true; conn.error = ''; conn.requested = false; conn.sawConnecting = false; conn.newTab = 0;
+    // "Em nova aba" só faz sentido com esta aba ocupada; parada, a conexão é nela mesma
+    const offer = state.status !== 'disconnected';
+    $('cNewTabRow').hidden = !offer;
+    $('cNewTab').checked = offer && !!(opts && opts.newTab === true);
+    $('cNewTabRow').title = offer ? 'Conecta sem sair de "' + (state.server.name || state.host) + '". Sem marcar, esta aba troca de servidor.' : '';
     openModal($('dlgConnect'));
     updateConnectDialog();
     if (!conn.prefilled) {
@@ -997,7 +1016,7 @@
   }
 
   function closeConnectDialog() {
-    conn.open = false; conn.requested = false;
+    conn.open = false; conn.requested = false; conn.newTab = 0;
     clearTimeout(conn.timer);
     closeModal($('dlgConnect'));
   }
@@ -1009,6 +1028,8 @@
     $('connectOk').textContent = busy ? 'Conectando…' : 'Conectar';
     $('connectSpinner').hidden = !busy;
     $('connectError').textContent = busy ? '' : conn.error;
+    // a tentativa em nova aba falhou e a aba ficou parada: a próxima é nela mesma
+    if (!busy && state.status === 'disconnected') $('cNewTabRow').hidden = true;
   }
 
   async function submitConnect() {
@@ -1025,8 +1046,10 @@
     if (req.nickname.length < 3) { conn.error = 'O apelido precisa ter pelo menos 3 caracteres.'; updateConnectDialog(); $('cNick').focus(); return; }
     conn.error = ''; conn.submitting = true; conn.requested = true; conn.sawConnecting = false;
     updateConnectDialog();
+    const newTab = !$('cNewTabRow').hidden && $('cNewTab').checked;
     try {
-      await call('Connect', req);
+      if (newTab) conn.newTab = Number(await call('ConnectNewTab', req)) || 0; // a aba nova passa a ser a que está à vista
+      else await call('Connect', req);
       // caso o backend conecte sem passar por "connecting"
       clearTimeout(conn.timer);
       conn.timer = setTimeout(() => { if (conn.open && conn.requested && state.status === 'connected') closeConnectDialog(); }, 1500);
@@ -1372,7 +1395,7 @@
   function renderMeter() {
     const level = talking.micLevel || 0;
     const byLevel = state.audio.vadMode === 'level';
-    const open = !!talking.self || (byLevel && level >= state.audio.vadThreshold && !state.self.muted && level > 0);
+    const open = !!talking.self || !!talking.tx || (byLevel && level >= state.audio.vadThreshold && !state.self.muted && level > 0);
     $('vadProb').textContent = Math.round(clamp(talking.voiceProb || 0, 0, 1) * 100) + '%';
     const fill = $('vadFill');
     fill.style.width = (level > 0 ? vadPos(level) * 100 : 0).toFixed(1) + '%';
@@ -1380,13 +1403,280 @@
     const gate = $('vadGate');
     gate.textContent = state.self.muted ? 'mutado' : open ? 'transmitindo' : 'fechado';
     gate.classList.toggle('open', open && !state.self.muted);
-    $('txIndicator').hidden = !(talking.self && state.status === 'connected');
+    // o que falamos vai para a aba do microfone, que pode não ser a que está à vista
+    const here = talking.self && state.status === 'connected';
+    const mic = micTab();
+    const away = !here && talking.tx && !!mic && mic.id !== curTab;
+    $('txIndicator').hidden = !(here || away);
+    const txText = away ? 'Transmitindo em ' + tabName(mic) : 'Transmitindo';
+    if ($('txText').textContent !== txText) $('txText').textContent = txText;
+  }
+
+  // ------------------------------------------------------------------ abas de servidores
+  // Cada servidor conectado é uma aba. O backend manda o estado inteiro só da
+  // aba à vista (state.tab) e um resumo de todas (state.tabs). Aqui fica o que
+  // é da interface em cada aba — seleção, canais recolhidos, conversas abertas,
+  // rascunho —, guardado ao sair dela e reposto ao voltar; o bate-papo é
+  // remontado com as mensagens da aba.
+  const tabUI = new Map();     // id da aba → o que foi guardado dela
+  let curTab = 0;              // a aba que a interface mostra (0 = nenhuma ainda)
+  let wantTab = 0;             // a aba pedida por último, enquanto o backend não confirma
+  let chatEpoch = 0;           // muda a cada troca: resposta de GetMessages de uma troca anterior é descartada
+  let chatLoading = true;      // o bate-papo está sendo (re)montado: o que chega espera em chatQueue
+  let chatQueue = [];
+  let talkingTabs = new Set(); // abas em que alguém está falando
+  let stabsHtml = '';
+  let scriptTabsSig = '';      // a última lista de abas entregue aos scripts
+  const STATUS_TEXT = { connected: 'conectado', connecting: 'conectando…', reconnecting: 'reconectando…', disconnected: 'desconectado' };
+
+  // callOn chama a API numa aba específica; call (acima) age na que está à vista.
+  const callOn = (tab, name, ...args) => { try { return Promise.resolve(bridge.forTab(tab)[name](...args)); } catch (e) { return Promise.reject(e); } };
+  const tabName = (t) => (t ? t.name || t.host || 'Nova aba' : '');
+  const findTab = (id) => state.tabs.find((t) => t.id === id);
+  const micTab = () => state.tabs.find((t) => t.mic);
+
+  function renderServerTabs() {
+    const bar = $('serverTabs');
+    const list = state.tabs;
+    bar.hidden = list.length < 2;
+    bar.classList.toggle('many', list.length >= 6);
+    const html = bar.hidden ? '' : list.map((t) => {
+      const name = tabName(t);
+      const tip = name + (t.host && t.host !== name ? ' (' + t.host + ')' : '') + ' — ' + STATUS_TEXT[t.status];
+      return `<button type="button" class="stab st-${t.status}${t.id === curTab ? ' active' : ''}${t.unread ? ' unread' : ''}${t.silenced ? ' silenced' : ''}" role="tab" aria-selected="${t.id === curTab}" data-stab="${t.id}" title="${esc(tip)}">` +
+        '<span class="stab-dot"></span>' +
+        `<span class="stab-label">${esc(name)}</span>` +
+        (t.silenced ? `<span class="stab-mark" title="Servidor silenciado: você não ouve esta aba">${icon('spk-s')}</span>` : '') +
+        (t.unread ? `<span class="badge" title="Mensagens não lidas">${t.unread > 99 ? '99+' : t.unread}</span>` : '') +
+        (t.mic ? `<span class="stab-mic on" title="Você fala neste servidor">${icon('mic')}</span>`
+          : t.status !== 'disconnected' ? `<span class="stab-mic" data-mic="${t.id}" title="Falar neste servidor">${icon('mic')}</span>` : '') +
+        `<span class="stab-close" data-close="${t.id}" title="Fechar aba">${icon('x')}</span>` +
+        '</button>';
+    }).join('');
+    if (html !== stabsHtml) { stabsHtml = html; bar.innerHTML = html; }
+    applyTabTalking();
+  }
+
+  // acende a bolinha das abas em que alguém fala e o microfone da aba em que transmitimos
+  function applyTabTalking() {
+    $('serverTabs').querySelectorAll('.stab').forEach((el) => {
+      el.classList.toggle('talking', talkingTabs.has(Number(el.dataset.stab)));
+      const mic = el.querySelector('.stab-mic.on');
+      if (mic) mic.classList.toggle('tx', !!talking.tx);
+    });
+  }
+
+  // Barra de estado: com mais de uma aba, diz em que servidor está o microfone.
+  function renderMicWhere() {
+    const el = $('micWhere');
+    const list = state.tabs;
+    const mic = micTab();
+    let text = '', cls = '', tip = '';
+    if (list.length >= 2) {
+      if (mic && mic.status !== 'disconnected') {
+        if (mic.id === curTab) { text = 'Microfone neste servidor'; tip = 'O que você fala vai para este servidor.'; }
+        else {
+          text = 'Microfone em ' + tabName(mic) + (mic.status === 'connected' ? '' : ' (' + STATUS_TEXT[mic.status] + ')');
+          cls = 'elsewhere';
+          tip = 'Você fala em "' + tabName(mic) + '", não neste servidor.' + (state.status !== 'disconnected' ? ' Clique para falar aqui.' : '');
+        }
+      } else if (list.some((t) => t.status === 'connected')) {
+        text = 'Microfone sem servidor: escolha a aba em que quer falar';
+        cls = 'none';
+        tip = 'Ninguém ouve você agora.' + (state.status !== 'disconnected' ? ' Clique para falar neste servidor.' : '');
+      }
+    }
+    el.hidden = !text;
+    const html = icon('mic') + '<span>' + esc(text) + '</span>';
+    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
+    el.className = 'mic-where' + (cls ? ' ' + cls : '');
+    el.title = tip;
+  }
+
+  function serverTabMenu(t) {
+    return [
+      { label: 'Falar neste servidor', checked: t.mic, disabled: t.mic || t.status === 'disconnected', action: () => setMicTab(t.id) },
+      { label: t.silenced ? 'Voltar a ouvir este servidor' : 'Silenciar este servidor', action: () => callOn(t.id, 'SetTabSilenced', !t.silenced).catch((e) => localLine('error', errText(e))) },
+      { sep: true },
+      { label: 'Fechar aba', action: () => closeServerTab(t.id) },
+    ];
+  }
+
+  function setMicTab(id) {
+    callOn(id, 'SetMicTab').catch((e) => localLine('error', errText(e)));
+  }
+
+  // Troca a aba à vista. Com um diálogo aberto não se troca: ele é da aba atual.
+  function switchServerTab(id) {
+    if (!id || openModals.length || !findTab(id) || id === (wantTab || curTab)) return;
+    wantTab = id;
+    callOn(id, 'SelectTab').then((st) => {
+      if (wantTab !== id) return; // já pediram outra aba depois desta
+      wantTab = 0;
+      if (st && Number(st.tab) === id) onState(st);
+    }, (e) => { if (wantTab === id) wantTab = 0; localLine('error', errText(e)); });
+  }
+  function stepServerTab(dir) {
+    const list = state.tabs;
+    if (list.length < 2) return;
+    const i = list.findIndex((t) => t.id === (wantTab || curTab));
+    switchServerTab(list[(i + dir + list.length) % list.length].id);
+  }
+
+  async function closeServerTab(id) {
+    const t = findTab(id);
+    if (!t || openModals.length) return;
+    if (t.status !== 'disconnected') {
+      const ok = await askConfirm({ title: 'Fechar aba', text: 'Sair do servidor "' + tabName(t) + '" e fechar a aba?', okLabel: 'Fechar aba' });
+      if (!ok) return;
+    }
+    callOn(id, 'CloseTab').catch((e) => localLine('error', errText(e)));
+  }
+
+  // Ctrl+Tab / Ctrl+Shift+Tab: próxima aba / anterior; Cmd (ou Ctrl) + 1…9: a
+  // aba nessa posição. Um atalho do usuário com a mesma combinação tem preferência.
+  function serverTabKey(e) {
+    const list = state.tabs;
+    if (list.length < 2 || openModals.length) return false;
+    let step = 0, to = 0;
+    if (e.key === 'Tab' && e.ctrlKey && !e.altKey && !e.metaKey) step = e.shiftKey ? -1 : 1;
+    else if (/^Digit[1-9]$/.test(e.code) && !e.altKey && !e.shiftKey) {
+      const mac = state.platform ? state.platform === 'darwin' : /Mac/i.test(navigator.platform || '');
+      if (mac ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey) return false;
+      const hk = state.hotkeys || {}, combo = comboFromEvent(e);
+      if ([hk.ptt, hk.toggleMute, hk.toggleDeafen, hk.soundStop].includes(combo) || (state.audio.sounds || []).some((x) => x.hotkey === combo)) return false;
+      const t = list[Number(e.code.slice(5)) - 1];
+      if (!t) return false;
+      to = t.id;
+    } else return false;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.repeat) { if (step) stepServerTab(step); else switchServerTab(to); }
+    return true;
+  }
+
+  // ---- o que é da interface em cada aba
+  function saveTabUI() {
+    if (!curTab) return;
+    tabUI.set(curTab, {
+      selection, userSelected, collapsed: Array.from(collapsed), prevStatus,
+      activeChat: activeTab,
+      unread: { server: tabs.get('server').unread, channel: tabs.get('channel').unread },
+      privates: tabOrder.map((k) => tabs.get(k)).filter((t) => t.kind === 'private').map((t) => ({ peerId: t.peerId, label: t.label, unread: t.unread })),
+      draft: $('chatInput').value,
+      lastMsg: lastMsgId,
+    });
+  }
+
+  // leaveTab roda com o estado da aba antiga ainda em vigor.
+  function leaveTab() {
+    saveTabUI();
+    closePopover();
+    // o bate-papo da aba antiga sai da tela
+    for (const key of tabOrder.slice()) {
+      const t = tabs.get(key);
+      if (t.kind !== 'private') continue;
+      t.view.remove();
+      tabs.delete(key);
+      tabOrder.splice(tabOrder.indexOf(key), 1);
+    }
+    for (const t of tabs.values()) { t.view.textContent = ''; t.unread = 0; t.stick = true; t.top = 0; t.hasHist = false; t.histSep = false; }
+    seenIds.clear();
+    lastMsgId = 0;
+    talkingSet = new Set();
+    talking = Object.assign({}, talking, { clients: [], self: false });
+  }
+
+  // enterTab roda já com o estado da aba nova.
+  function enterTab() {
+    const ui = tabUI.get(curTab);
+    selection = ui ? ui.selection : null;
+    userSelected = ui ? ui.userSelected : false;
+    collapsed.clear();
+    if (ui) ui.collapsed.forEach((id) => collapsed.add(id));
+    // aba vista pela primeira vez: não é "conexão nova", é só a primeira visita
+    prevStatus = ui ? ui.prevStatus : state.status;
+    if (ui) {
+      ui.privates.forEach((p) => { createTab('p:' + p.peerId, 'private', p.peerId, p.label).unread = p.unread || 0; });
+      tabs.get('server').unread = ui.unread.server || 0;
+      tabs.get('channel').unread = ui.unread.channel || 0;
+    }
+    activeTab = ui && tabs.has(ui.activeChat) ? ui.activeChat : 'server';
+    for (const t of tabs.values()) t.view.hidden = t.key !== activeTab;
+    $('chatInput').value = ui ? ui.draft || '' : '';
+    // o que faltava num servidor pode existir no outro
+    for (const [id, url] of iconCache) if (!url) iconCache.delete(id);
+    iconTries.clear();
+    avatarCache.forEach((url, key) => { if (!url) avatarCache.delete(key); });
+    infoHoldUntil = 0;
+    renderTabs();
+    loadChat(curTab, ui);
+  }
+
+  // Remonta o bate-papo da aba com as mensagens que o backend guarda dela. O
+  // que chega enquanto isso espera em chatQueue, para entrar na ordem certa; se
+  // a pessoa trocar de aba de novo antes da resposta, a resposta é descartada.
+  function loadChat(id, ui) {
+    const epoch = ++chatEpoch;
+    chatLoading = true;
+    chatQueue = [];
+    const seen = ui ? ui.lastMsg || 0 : Infinity; // até onde a pessoa já tinha visto (primeira visita: nada conta como novo)
+    callOn(id, 'GetMessages').catch(() => []).then((list) => {
+      if (epoch !== chatEpoch) return;
+      (Array.isArray(list) ? list : []).forEach((m) => {
+        if (!m || (m.tab && m.tab !== id)) return;
+        const old = !(m.id > seen);
+        if (old && ui && m.targetMode === 1 && !tabs.has('p:' + m.peerId)) return; // conversa privada que já tinha sido fechada
+        appendMessage(m, old);
+      });
+      chatLoading = false;
+      const queued = chatQueue;
+      chatQueue = [];
+      queued.forEach((m) => appendMessage(m, false));
+      activateTab(tabs.has(activeTab) ? activeTab : 'server');
+    });
+  }
+
+  function onMessage(m) {
+    if (!m || (m.tab && curTab && m.tab !== curTab)) return; // de uma aba fora da vista: o backend conta como não lida
+    if (chatLoading) chatQueue.push(m);
+    else appendMessage(m, false);
+  }
+
+  // O resumo das abas mudou (com ou sem o estado inteiro).
+  function tabsChanged() {
+    const ids = new Set(state.tabs.map((t) => t.id));
+    for (const id of Array.from(tabUI.keys())) if (!ids.has(id)) tabUI.delete(id); // aba fechada
+    for (const t of state.tabs) {
+      // a conexão caiu com a aba fora da vista: ao voltar a ela, vale como conexão nova
+      const ui = t.id !== curTab && t.status !== 'connected' ? tabUI.get(t.id) : null;
+      if (ui) ui.prevStatus = t.status;
+    }
+    // os scripts rodam uma vez para cada servidor: precisam saber quais abas existem
+    const sig = state.tabs.map((t) => t.id + ':' + tabName(t)).join('|');
+    if (sig !== scriptTabsSig && window.FuritoScripts.setTabs) {
+      scriptTabsSig = sig;
+      window.FuritoScripts.setTabs(state.tabs.map((t) => ({ id: t.id, name: tabName(t) })));
+    }
+    renderServerTabs();
+    renderMicWhere();
+  }
+  function onTabs(list) {
+    state.tabs = normTabs(list);
+    tabsChanged();
+    renderMeter();
   }
 
   // ------------------------------------------------------------------ eventos do backend
   function onState(raw) {
-    state = normalize(raw);
+    const next = normalize(raw);
+    const switched = curTab !== 0 && next.tab !== 0 && next.tab !== curTab;
+    if (switched) leaveTab();
+    state = next;
     bridge.tab = state.tab; // os pedidos ao backend passam a dizer que são desta aba
+    if (state.tab) curTab = state.tab;
+    if (wantTab === curTab) wantTab = 0;
+    if (switched) enterTab();
     if (state.status === 'connected' && prevStatus !== 'connected') {
       // nova conexão: ids de clientes antigos não valem mais
       for (const key of tabOrder.slice()) if (tabs.get(key).kind === 'private') closeTab(key);
@@ -1395,10 +1685,11 @@
       avatarCache.forEach((url, key) => { if (!url) avatarCache.delete(key); }); // conexão nova: tenta de novo os avatares que falharam
     }
     if (state.audio.vadMode !== 'ptt') releasePTT();
-    if (state.status !== 'connected') { talkingSet = new Set(); talking = { clients: [], self: false, micLevel: talking.micLevel || 0, voiceProb: talking.voiceProb || 0 }; }
+    if (state.status !== 'connected') { talkingSet = new Set(); talking = { clients: [], self: false, tx: talking.tx, micLevel: talking.micLevel || 0, voiceProb: talking.voiceProb || 0 }; }
     prevStatus = state.status;
     window.FuritoScreen.onState(state);
     validateSelection();
+    tabsChanged();
     renderTree();
     renderInfo();
     renderChrome();
@@ -1408,15 +1699,21 @@
 
   function onTalking(t) {
     t = t || {};
-    talking = { clients: Array.isArray(t.clients) ? t.clients : [], self: !!t.self, micLevel: Number(t.micLevel) || 0, voiceProb: Number(t.voiceProb) || 0 };
+    talking = { clients: Array.isArray(t.clients) ? t.clients : [], self: !!t.self, tx: !!t.tx, micLevel: Number(t.micLevel) || 0, voiceProb: Number(t.voiceProb) || 0 };
     talkingSet = new Set(talking.clients);
+    talkingTabs = new Set(Array.isArray(t.tabs) ? t.tabs.map(Number) : []);
     applyTalking();
+    applyTabTalking();
     renderMeter();
   }
 
   function onMenu(action) {
     switch (action) {
       case 'connect': openConnectDialog(); break;
+      case 'newTab': if (!openModals.length) openConnectDialog({ newTab: true }); break;
+      case 'closeTab': closeServerTab(curTab); break;
+      case 'nextTab': stepServerTab(1); break;
+      case 'prevTab': stepServerTab(-1); break;
       case 'disconnect': run('Disconnect'); break;
       case 'toggleMute': run('ToggleMute'); break;
       case 'toggleDeafen': run('ToggleDeafen'); break;
@@ -1578,6 +1875,32 @@
       sendClientVol(Number(slider.dataset.client), v);
     });
 
+    // abas de servidores
+    const stabs = $('serverTabs');
+    stabs.addEventListener('click', (e) => {
+      const close = e.target.closest('[data-close]');
+      if (close) { closeServerTab(Number(close.dataset.close)); return; }
+      const mic = e.target.closest('[data-mic]');
+      if (mic) { setMicTab(Number(mic.dataset.mic)); return; }
+      const tab = e.target.closest('.stab');
+      if (tab) switchServerTab(Number(tab.dataset.stab));
+    });
+    stabs.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // o botão do meio fecha, não rola a página
+    stabs.addEventListener('auxclick', (e) => {
+      const tab = e.button === 1 ? e.target.closest('.stab') : null;
+      if (tab) { e.preventDefault(); closeServerTab(Number(tab.dataset.stab)); }
+    });
+    stabs.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const el = e.target.closest('.stab');
+      const t = el ? findTab(Number(el.dataset.stab)) : null;
+      if (t) showContextMenu(e.clientX, e.clientY, serverTabMenu(t));
+    });
+    $('micWhere').addEventListener('click', () => {
+      const mic = micTab();
+      if (state.status !== 'disconnected' && !(mic && mic.id === curTab)) setMicTab(curTab);
+    });
+
     // abas e bate-papo
     $('tabBar').addEventListener('click', (e) => {
       const close = e.target.closest('[data-close]');
@@ -1612,8 +1935,11 @@
     $('connectForm').addEventListener('submit', (e) => { e.preventDefault(); submitConnect(); });
     $('connectCancel').addEventListener('click', () => {
       const abort = conn.requested && state.status === 'connecting';
+      // a aba aberta por esta tentativa não fica para trás, vazia
+      const mine = conn.newTab && conn.newTab === state.tab && (abort || state.status === 'disconnected') ? conn.newTab : 0;
       closeConnectDialog();
-      if (abort) run('Disconnect');
+      if (mine) callOn(mine, 'CloseTab').catch(() => {});
+      else if (abort) run('Disconnect');
     });
     $('passwordForm').addEventListener('submit', (e) => { e.preventDefault(); closePasswordDialog(true); });
     $('pwCancel').addEventListener('click', () => closePasswordDialog(false));
@@ -1633,6 +1959,7 @@
         else if (e.code && !isModifierKey(e)) hkCapture.done(comboFromEvent(e));
         return;
       }
+      if (serverTabKey(e)) return;
       onHotkeyDown(e);
     }, true);
     document.addEventListener('keyup', onHotkeyUp, true);
@@ -2393,6 +2720,10 @@
   function bookmarksMenu() {
     const items = (state.bookmarks || []).map((b) => ({ label: b.name || b.host, action: () => run('ConnectBookmark', [b.id]) }));
     if (!items.length) items.push({ label: '(nenhum favorito)', disabled: true, action() {} });
+    else if (state.status !== 'disconnected') {
+      // com esta aba ocupada, dá para conectar ao favorito sem sair do servidor atual
+      items.push({ label: 'Conectar em nova aba', items: (state.bookmarks || []).map((b) => ({ label: b.name || b.host, action: () => run('ConnectBookmarkNewTab', [b.id]) })) });
+    }
     items.push({ sep: true });
     items.push({ label: 'Adicionar este servidor aos favoritos', disabled: state.status !== 'connected', action: addCurrentBookmark });
     items.push({ label: 'Gerenciar favoritos…', action: openBookmarks });
@@ -2423,7 +2754,7 @@
         '<label>Apelido:</label><input type="text" class="f-nick" maxlength="30" spellcheck="false" data-no-enter="1">' +
         '<label>Canal padrão:</label><input type="text" class="f-chan" maxlength="255" placeholder="(opcional)" spellcheck="false" data-no-enter="1">' +
         '<label>Identidade:</label><select class="f-ident"></select>' +
-        '</div><div class="set-row wrap" style="margin-top:12px"><button type="button" class="btn f-new">Novo</button><button type="button" class="btn f-save">Salvar</button><button type="button" class="btn f-del">Excluir</button><button type="button" class="btn f-go">Conectar</button></div>' +
+        '</div><div class="set-row wrap" style="margin-top:12px"><button type="button" class="btn f-new">Novo</button><button type="button" class="btn f-save">Salvar</button><button type="button" class="btn f-del">Excluir</button><button type="button" class="btn f-go">Conectar</button><button type="button" class="btn f-gotab" title="Conecta sem sair do servidor atual">Em nova aba</button></div>' +
         '</div></div>',
       onClose: () => { bookmarkDlg = null; },
       onOpen: (d) => {
@@ -2446,6 +2777,8 @@
           if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
           d.q('.f-del').disabled = !sel;
           d.q('.f-go').disabled = !sel;
+          d.q('.f-gotab').disabled = !sel;
+          d.q('.f-gotab').hidden = state.status === 'disconnected'; // aba parada: "Conectar" já não tira ninguém de servidor nenhum
         };
         d.q('.bm-list').addEventListener('click', (e) => {
           const it = e.target.closest('.list-item');
@@ -2479,6 +2812,7 @@
           try { await call('DeleteBookmark', sel); sel = ''; fill(); d.refresh(); } catch (e) { d.setError(errText(e)); }
         });
         d.q('.f-go').addEventListener('click', () => { if (sel) { const id = sel; d.close(); run('ConnectBookmark', [id]); } });
+        d.q('.f-gotab').addEventListener('click', () => { if (sel) { const id = sel; d.close(); run('ConnectBookmarkNewTab', [id]); } });
         d.el.querySelector('.dlg-form').addEventListener('keydown', (e) => {
           if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); d.q('.f-save').click(); }
         });
@@ -2588,13 +2922,15 @@
     const scr = window.FuritoScreen;
     const on = state.status === 'connected';
     const sh = scr.sharing();
-    $('tbScreen').disabled = !on;
+    $('tbScreen').disabled = !on && !sh; // dá para parar daqui a transmissão que está em outra aba
     $('tbScreen').classList.toggle('active', !!sh);
     $('tbScreen').title = sh ? 'Parar de compartilhar a tela' : 'Compartilhar tela';
     const ind = $('screenIndicator');
     ind.hidden = !sh;
     if (sh) {
-      const html = icon('screen') + '<span>Compartilhando a tela · ' + (sh.viewers === 0 ? 'ninguém assistindo' : sh.viewers === 1 ? '1 assistindo' : sh.viewers + ' assistindo') + ' ✕</span>';
+      // a transmissão é da aba em que começou: olhando outra, o indicador diz onde ela está
+      const where = sh.here === false ? ' em ' + esc(tabName(findTab(sh.tab)) || 'outra aba') : '';
+      const html = icon('screen') + '<span>Compartilhando a tela' + where + ' · ' + (sh.viewers === 0 ? 'ninguém assistindo' : sh.viewers === 1 ? '1 assistindo' : sh.viewers + ' assistindo') + ' ✕</span>';
       if (ind.dataset.html !== html) { ind.dataset.html = html; ind.innerHTML = html; }
     }
     const w = scr.watching();
@@ -2675,7 +3011,7 @@
 
   function bindScreen() {
     const scr = window.FuritoScreen;
-    scr.init({ call, getState: () => state, notify: (level, text) => localLine(level, text), changed: onScreenChanged });
+    scr.init({ call, forTab: (id) => bridge.forTab(id), getState: () => state, notify: (level, text) => localLine(level, text), changed: onScreenChanged });
     scr.attachVideo($('svVideo'));
     $('tbScreen').addEventListener('click', () => { if (scr.sharing()) scr.stop(); else shareScreenDialog(); });
     $('screenIndicator').addEventListener('click', () => scr.stop());
@@ -3036,7 +3372,9 @@
   let pokeDlg = null;
   function onPoke(p) {
     p = p || {};
-    const text = '"' + (p.fromName || '?') + '" cutucou você' + (p.message ? ': ' + p.message : '.');
+    // com mais de uma aba, a janela diz em que servidor foi
+    const where = state.tabs.length >= 2 ? String(p.server || tabName(findTab(Number(p.tab))) || '') : '';
+    const text = '"' + (p.fromName || '?') + '" cutucou você' + (where ? ' em "' + where + '"' : '') + (p.message ? ': ' + p.message : '.');
     if (pokeDlg && !pokeDlg.closed) {
       const box = pokeDlg.q('.dlg-text');
       const line = document.createElement('div');
@@ -3297,6 +3635,7 @@
     const row = (type, id) => $('tree').querySelector(`.row[data-type="${type}"][data-id="${id}"]`);
     switch (name) {
       case 'dialog': openConnectDialog(); break;
+      case 'newtab': openConnectDialog({ newTab: true }); break; // conectado: o diálogo oferece "Em nova aba"
       case 'error': openConnectDialog().then(() => { $('cHost').value = 'erro.exemplo.com'; submitConnect(); }); break;
       case 'client': select('client', 3, true); break;
       case 'channel': select('channel', 3, true); break;
@@ -3364,6 +3703,19 @@
           await FS.save({ name: T[4].name, code: T[4].code, enabled: true, moderation: true });
           setTimeout(() => call('_mockVisitor', true), 600);
           openScripts().q('.list-item[data-id="' + first.id + '"]').click();
+        })();
+        break;
+      case 'tabs': // duas abas (ou ?n=3…8): a mais nova à vista; a primeira com o microfone, gente falando e uma mensagem não lida
+        (async () => {
+          const first = state.tab;
+          const n = clamp(Number(new URLSearchParams(location.search).get('n')) || 2, 2, 8);
+          for (let k = 2; k <= n; k++) {
+            const before = state.tab;
+            await call('ConnectNewTab', { host: k === 2 ? 'escritorio.exemplo.com' : 'outro-' + k + '.exemplo.com', nickname: state.self.nickname });
+            for (let i = 0; i < 100 && !(state.tab !== before && state.status === 'connected' && !chatLoading); i++) await new Promise((r) => setTimeout(r, 50));
+          }
+          await callOn(first, '_mockSay', 3, 'voltei, alguém aí?');
+          select('channel', 3, true);
         })();
         break;
       case 'selftest': selfTest(row); break;
@@ -4163,8 +4515,191 @@
         sd._dismiss(); await wait(30);
         chk('scriptsClosed', !openModals.includes(sd));
       }
+      // ---- abas de servidores (várias conexões)
+      {
+        const untilT = async (cond, ms) => { const t0 = performance.now(); while (performance.now() - t0 < (ms || 4000)) { if (cond()) return true; await wait(40); } return false; };
+        const bar = $('serverTabs');
+        const stab = (id) => bar.querySelector('.stab[data-stab="' + id + '"]');
+        const treeText = () => $('tree').textContent;
+        const chatText = () => $('chatViews').textContent;
+        const micAt = () => (state.tabs.find((t) => t.mic) || {}).id;
+        const ctrlTab = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', code: 'Tab', ctrlKey: true, bubbles: true, cancelable: true }));
+        const go = async (id) => { stab(id).click(); await untilT(() => state.tab === id && !chatLoading); };
+        await call('SetPokePopup', true);
+        const A = state.tab;
+        const peopleA = state.clients.map((c) => ({ id: c.id, nickname: c.nickname }));
+        const selA = JSON.stringify(selection), chatA = activeTab, orderA = tabOrder.join(','), draftA = $('chatInput').value;
+        chk('tabsHiddenWithOne', bar.hidden && state.tabs.length === 1 && state.tabs[0].mic && $('micWhere').hidden, JSON.stringify(state.tabs));
+
+        // "Em nova aba" no diálogo de conectar: a barra aparece e a aba nova fica à vista
+        $('tbConnect').click(); await wait(60);
+        chk('tabsOfferedInDialog', !$('cNewTabRow').hidden && !$('cNewTab').checked);
+        $('cHost').value = 'escritorio.exemplo.com';
+        $('cNewTab').checked = true;
+        $('connectOk').click();
+        await untilT(() => state.tab !== A && state.status === 'connected' && !chatLoading && $('dlgConnect').hidden);
+        const B = state.tab;
+        chk('tabsOpened', B !== A && !bar.hidden && bar.querySelectorAll('.stab').length === 2 && !!stab(B) && stab(B).classList.contains('active') && stab(B).textContent.includes('Escritório') && stab(A).textContent.includes('TeamSpeak 6 Server'), JSON.stringify(state.tabs));
+        chk('tabsTreeIsNewServer', treeText().includes('Recepção') && !treeText().includes('Counter-Strike') && tabs.get('server').label === 'Escritório', tabs.get('server').label);
+        chk('tabsChatIsNewServer', chatText().includes('Bem-vindo ao servidor do escritório') && !chatText().includes('TeamSpeak 6 Server') && tabOrder.join(',') === 'server,channel', tabOrder.join(','));
+        // o microfone não muda de servidor por causa da aba nova, e a barra de estado diz onde ele está
+        chk('tabsMicStays', micAt() === A && !!stab(A).querySelector('.stab-mic.on') && !!stab(B).querySelector('[data-mic]') && !$('micWhere').hidden && $('micWhere').classList.contains('elsewhere') && $('micWhere').textContent.includes('TeamSpeak 6 Server'), $('micWhere').textContent);
+
+        // os mesmos números de cliente nos dois servidores: cada aba mostra a pessoa dela
+        const twin = state.clients.find((c) => c.id !== state.self.clientId && peopleA.some((x) => x.id === c.id && x.nickname !== c.nickname));
+        const twinA = twin ? peopleA.find((x) => x.id === twin.id).nickname : '';
+        if (twin) fire(row('client', twin.id), 'mousedown');
+        chk('tabsSameIdOtherPerson', !!twin && $('info').textContent.includes(twin.nickname) && !$('info').textContent.includes(twinA), twin ? twin.id + ' ' + twin.nickname + '/' + twinA : 'sem id repetido');
+
+        // seleção, bate-papo e rascunho ficam com a aba
+        fire(row('channel', 3), 'mousedown');
+        $('chatInput').value = 'rascunho B';
+        await go(A);
+        chk('tabsBackToFirst', treeText().includes('Counter-Strike') && !treeText().includes('Recepção') && JSON.stringify(selection) === selA && activeTab === chatA && tabOrder.join(',') === orderA &&
+          $('chatInput').value === draftA && chatText().includes('TeamSpeak 6 Server') && !chatText().includes('servidor do escritório') && stab(A).classList.contains('active'),
+          JSON.stringify(selection) + ' ' + activeTab + ' ' + tabOrder.join(','));
+
+        // scripts: cada script ligado roda uma vez por servidor, e cada cópia fala com o servidor dela
+        if (new URLSearchParams(location.search).has('scripts')) {
+          const FS = window.FuritoScripts;
+          const sc = await FS.save({ name: 'Uma cópia por servidor', code: "ts.getSelf().then((s) => ts.log('aqui é ' + s.server));\n", enabled: true });
+          const lines = () => FS.logOf(sc.id).map((l) => l.text);
+          await untilT(() => lines().filter((x) => x.includes('aqui é')).length === 2, 6000);
+          chk('tabsScriptPerServer', FS.instances(sc.id).slice().sort().join(',') === [A, B].sort().join(',') &&
+            lines().includes('[TeamSpeak 6 Server] aqui é TeamSpeak 6 Server') && lines().includes('[Escritório] aqui é Escritório'), FS.instances(sc.id).join(',') + ' ' + JSON.stringify(lines()));
+          await FS.remove(sc.id);
+          chk('tabsScriptRemoved', FS.instances(sc.id).length === 0 && !FS.get(sc.id));
+        }
+        if (twin) { fire(row('client', twin.id), 'mousedown'); chk('tabsSameIdFirstServer', $('info').textContent.includes(twinA) && !$('info').textContent.includes(twin.nickname)); }
+        $('chatInput').value = 'rascunho A';
+        const unreadA = tabs.get('channel').unread; // o que já estava por ler no canal da aba A
+        await go(B);
+        chk('tabsSelectionPerTab', !!selection && selection.type === 'channel' && selection.id === 3 && $('info').textContent.includes('Reunião semanal') && $('chatInput').value === 'rascunho B', JSON.stringify(selection) + ' ' + $('chatInput').value);
+
+        // alguém compartilha a tela na aba de fundo: o aviso não marca a pessoa de mesmo número na aba à vista
+        if (twin && twin.id === 3) {
+          await callOn(A, '_mockPeerShare', true); await wait(150);
+          chk('tabsScreenSignalStaysInTab', !!row('client', 3) && !row('client', 3).querySelector('[data-act="watch-screen"]') && !window.FuritoScreen.isSharer(3));
+          await callOn(A, '_mockPeerShare', false); await wait(80);
+        }
+
+        // mensagem numa aba fora da vista: vira não lida na barra e não entra no bate-papo à vista
+        await callOn(A, '_mockSay', peopleA.find((x) => x.id !== state.self.clientId).id, 'mensagem na aba de fundo');
+        await untilT(() => !!stab(A).querySelector('.badge'), 1500);
+        chk('tabsUnreadBadge', !!stab(A).querySelector('.badge') && stab(A).querySelector('.badge').textContent === '1' && stab(A).classList.contains('unread') && !chatText().includes('mensagem na aba de fundo'), JSON.stringify(state.tabs));
+        await go(A);
+        chk('tabsUnreadShown', chatText().includes('mensagem na aba de fundo') && !stab(A).querySelector('.badge') && (activeTab === 'channel' || tabs.get('channel').unread === unreadA + 1) && $('chatInput').value === 'rascunho A', activeTab + ' ' + tabs.get('channel').unread + ' (antes ' + unreadA + ')');
+        $('chatInput').value = draftA;
+
+        // passar o microfone: um clique no microfone da outra aba; a barra de estado traz de volta
+        stab(B).querySelector('[data-mic]').click();
+        await untilT(() => micAt() === B);
+        chk('tabsMicMoves', micAt() === B && !!stab(B).querySelector('.stab-mic.on') && !!stab(A).querySelector('[data-mic]') && $('micWhere').classList.contains('elsewhere') && $('micWhere').textContent.includes('Escritório'), $('micWhere').textContent);
+        $('micWhere').click();
+        await untilT(() => micAt() === A);
+        chk('tabsMicHere', micAt() === A && !$('micWhere').hidden && !$('micWhere').classList.contains('elsewhere') && $('micWhere').textContent.includes('neste servidor'), $('micWhere').textContent);
+
+        // menu da aba: silenciar só aquele servidor
+        fire(stab(B), 'contextmenu', { button: 2 });
+        const silence = Array.from($('ctxMenu').querySelectorAll('.menu-item')).find((x) => x.textContent.includes('Silenciar este servidor'));
+        chk('tabsMenu', !$('ctxMenu').hidden && !!silence && $('ctxMenu').textContent.includes('Falar neste servidor') && $('ctxMenu').textContent.includes('Fechar aba'), $('ctxMenu').textContent);
+        if (silence) silence.click();
+        await untilT(() => (findTab(B) || {}).silenced === true, 1500);
+        chk('tabsSilenced', findTab(B).silenced && stab(B).classList.contains('silenced') && !!stab(B).querySelector('.stab-mark') && !findTab(A).silenced, JSON.stringify(state.tabs));
+        await callOn(B, 'SetTabSilenced', false);
+        await untilT(() => !findTab(B).silenced, 1500);
+
+        // troca rápida A→B→A: vale a última pedida, com o bate-papo dela (a resposta atrasada da outra é descartada)
+        switchServerTab(B); switchServerTab(A);
+        await wait(300);
+        await untilT(() => state.tab === A && !chatLoading);
+        chk('tabsQuickSwitch', state.tab === A && treeText().includes('Counter-Strike') && chatText().includes('mensagem na aba de fundo') && !chatText().includes('servidor do escritório') && stab(A).classList.contains('active') && tabOrder.join(',') === orderA, tabOrder.join(','));
+
+        // a transmissão de tela é da aba em que começou: continua ao olhar outra aba, e a interface diz onde ela está (só com ?rtc, em tempo real)
+        if (new URLSearchParams(location.search).has('rtc')) {
+          const scr = window.FuritoScreen, mine = () => row('client', state.self.clientId).querySelector('.sicon.screen.mine');
+          await scr.start({ source: 'pattern-js', quality: 720, fps: 15 }); await wait(60);
+          const was = !!scr.sharing() && !!mine();
+          await go(B); await wait(60);
+          const sh = scr.sharing() || {};
+          chk('tabsScreenShareStaysInItsTab', was && sh.tab === A && sh.here === false && !mine() && !$('screenIndicator').hidden && $('screenIndicator').textContent.includes('em TeamSpeak 6 Server') && $('tbScreen').classList.contains('active'), JSON.stringify(sh) + ' ' + $('screenIndicator').textContent);
+          await go(A); await wait(60);
+          chk('tabsScreenShareBack', !!scr.sharing() && scr.sharing().here === true && !!mine() && !$('screenIndicator').textContent.includes(' em '));
+          $('screenIndicator').click(); await wait(80);
+        }
+
+        // teclado: Ctrl+Tab e Cmd+número; com um diálogo aberto não se troca de aba
+        ctrlTab();
+        await untilT(() => state.tab === B && !chatLoading);
+        chk('tabsCtrlTab', state.tab === B);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '1', code: 'Digit1', metaKey: true, bubbles: true, cancelable: true }));
+        await untilT(() => state.tab === A && !chatLoading);
+        chk('tabsCmdNumber', state.tab === A);
+        openAbout(); await wait(30);
+        ctrlTab(); stab(B).click(); onMenu('nextTab');
+        await wait(250);
+        chk('tabsDialogBlocksSwitch', state.tab === A && !$('dlgAbout').hidden);
+        closeAbout(); await wait(30);
+
+        // cutucada numa aba fora da vista: a janela diz de que servidor veio
+        if (twin) {
+          await callOn(B, 'PokeClient', twin.id, 'oi');
+          await untilT(() => !!(pokeDlg && !pokeDlg.closed), 2500);
+          chk('tabsPokeSaysServer', !!pokeDlg && !pokeDlg.closed && pokeDlg.el.textContent.includes('em "Escritório"'), pokeDlg ? pokeDlg.el.textContent : 'sem janela');
+          if (pokeDlg && !pokeDlg.closed) pokeDlg.close();
+        }
+
+        // fechar a aba em que se fala: pede confirmação; sobrando uma conexão, o microfone vai para ela e a barra some
+        await callOn(B, 'SetMicTab');
+        await untilT(() => micAt() === B);
+        stab(B).querySelector('[data-close]').click(); await wait(40);
+        const cd = topDlg();
+        chk('tabsCloseAsks', !!cd && cd.textContent.includes('Escritório') && state.tabs.length === 2);
+        if (cd) cd.querySelector('.dlg-foot .btn.primary').click();
+        await untilT(() => state.tabs.length === 1);
+        chk('tabsClosed', state.tabs.length === 1 && state.tab === A && bar.hidden && $('micWhere').hidden && micAt() === A && state.status === 'connected' && treeText().includes('Counter-Strike'), JSON.stringify(state.tabs));
+
+        // tentativa em nova aba que falha: o erro aparece no diálogo e, ao cancelar, a aba vazia não fica para trás
+        onMenu('newTab'); await wait(60);
+        chk('tabsMenuNewTab', !$('dlgConnect').hidden && !$('cNewTabRow').hidden && $('cNewTab').checked);
+        $('cHost').value = 'erro.exemplo.com';
+        $('connectOk').click();
+        await untilT(() => state.tabs.length === 2 && state.status === 'disconnected' && $('connectError').textContent !== '', 3000);
+        chk('tabsFailedAttempt', state.tab !== A && $('connectError').textContent.includes('Falha ao conectar') && $('cNewTabRow').hidden && micAt() === A && !$('dlgConnect').hidden, $('connectError').textContent + ' ' + JSON.stringify(state.tabs));
+        $('connectCancel').click();
+        await untilT(() => state.tabs.length === 1 && state.tab === A && !chatLoading);
+        chk('tabsFailedAttemptCleans', state.tabs.length === 1 && state.tab === A && state.status === 'connected' && bar.hidden && $('dlgConnect').hidden && treeText().includes('Counter-Strike'), JSON.stringify(state.tabs));
+
+        // três servidores: sair daquele em que se fala deixa o microfone sem destino (a voz não pula para outro) até a pessoa escolher
+        const B2 = Number(await call('ConnectNewTab', { host: 'escritorio.exemplo.com', nickname: state.self.nickname }));
+        await untilT(() => state.tab === B2 && state.status === 'connected' && !chatLoading);
+        const C = Number(await call('ConnectNewTab', { host: 'outro.exemplo.com', nickname: state.self.nickname }));
+        await untilT(() => state.tab === C && state.status === 'connected' && !chatLoading);
+        await callOn(A, 'Disconnect');
+        await untilT(() => micAt() === undefined && (findTab(A) || {}).status === 'disconnected', 1500);
+        chk('tabsMicWithoutServer', state.tabs.length === 3 && micAt() === undefined && !$('micWhere').hidden && $('micWhere').classList.contains('none') && $('micWhere').textContent.includes('Microfone sem servidor') && !stab(A).querySelector('.stab-mic'),
+          $('micWhere').textContent + ' ' + JSON.stringify(state.tabs));
+        $('micWhere').click();
+        await untilT(() => micAt() === C, 1500);
+        chk('tabsMicChosenAgain', micAt() === C && !$('micWhere').classList.contains('none') && $('micWhere').textContent.includes('neste servidor'), $('micWhere').textContent);
+        // volta ao começo: só a primeira aba, conectada
+        await callOn(C, 'CloseTab');
+        await callOn(B2, 'CloseTab');
+        await untilT(() => state.tabs.length === 1 && state.tab === A && !chatLoading);
+        await call('Connect', { host: 'localhost', nickname: state.self.nickname });
+        await untilT(() => state.status === 'connected' && micAt() === A);
+      }
       $('tbDisconnect').click(); await wait(30);
       out.push('status=' + state.status + ' input=' + $('chatInput').disabled + ' tabs=' + tabOrder.join(','));
+      // a última aba não fecha (fica desconectada) e, parada, é reaproveitada por "nova aba"
+      {
+        const only = state.tab;
+        await call('CloseTab'); await wait(30);
+        chk('tabsLastOneStays', state.tabs.length === 1 && state.tab === only && state.status === 'disconnected');
+        const used = await call('ConnectNewTab', { host: 'localhost', nickname: 'Furico Caolho' });
+        await wait(30);
+        chk('tabsIdleTabReused', used === only && state.tabs.length === 1 && state.status === 'connecting', used + ' ' + JSON.stringify(state.tabs));
+      }
     } catch (e) { out.push('EXCEPTION ' + errText(e)); }
     showBanner('SELFTEST ' + out.join(' | '));
   }
@@ -4185,14 +4720,13 @@
     if (bridge.isMock) $('mockBadge').hidden = false;
     if (bridge.missingBackend) showBanner('Backend não encontrado — exibindo dados de demonstração.');
 
-    let ready = false;
-    const pending = [];
     bridge.on('state', onState);
+    bridge.on('tabs', onTabs);
     bridge.on('talking', onTalking);
     bridge.on('menu', onMenu);
     bridge.on('poke', onPoke);
-    bridge.on('screen:signal', (sig) => window.FuritoScreen.onSignal(sig));
-    bridge.on('message', (m) => { if (ready) appendMessage(m, false); else pending.push(m); });
+    bridge.on('screen:signal', (sig) => window.FuritoScreen.onSignal(sig)); // cada sinal diz de que aba é; screen.js separa
+    bridge.on('message', onMessage); // até o histórico inicial chegar, o que vier espera em chatQueue
 
     try {
       const [st, history] = await Promise.all([call('GetState'), call('GetMessages')]);
@@ -4201,12 +4735,18 @@
     } catch (e) {
       showBanner('Falha ao carregar o estado inicial: ' + errText(e));
     }
-    ready = true;
-    pending.forEach((m) => appendMessage(m, false));
+    if (chatEpoch === 0) { // (se já houve troca de aba, é loadChat quem libera a fila)
+      chatLoading = false;
+      const queued = chatQueue;
+      chatQueue = [];
+      queued.forEach((m) => { if (!m.tab || !curTab || m.tab === curTab) appendMessage(m, false); });
+    }
 
     // automações do usuário: liga os scripts guardados
-    window.FuritoScripts.init({ call, on: bridge.on, notify: (level, text) => localLine(level, text) })
+    window.FuritoScripts.init({ call, forTab: (id) => bridge.forTab(id), on: bridge.on, notify: (level, text) => localLine(level, text) })
       .catch((e) => localLine('error', 'Scripts: ' + errText(e)));
+    scriptTabsSig = '';
+    tabsChanged(); // os scripts passam a saber quais abas existem
 
     if (bridge.isMock) {
       const demo = new URLSearchParams(location.search).get('demo');
