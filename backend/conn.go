@@ -3,6 +3,7 @@ package backend
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +35,11 @@ type conn struct {
 	historyKey       string
 	silenced         bool // "silenciar esta aba": as vozes deste servidor não tocam
 	unread           int  // mensagens de bate-papo recebidas com a aba fora da vista
+
+	// limite das ações de script nesta conexão (allowScriptTalk)
+	talkMu     sync.Mutex
+	talkTokens float64
+	talkLast   time.Time
 
 	// protegidos por app.identMu:
 	identity *ts3.Identity // a identidade em uso nesta conexão (a de identID)

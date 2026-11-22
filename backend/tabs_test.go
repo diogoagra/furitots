@@ -375,3 +375,49 @@ func TestPokeAndIdentityKnowTheirTab(t *testing.T) {
 		t.Errorf("a aba que usava a identidade apagada deveria voltar para a padrão: %+v", st.Identity)
 	}
 }
+
+// Os eventos de script dizem de que conexão vieram, e o que um script pede
+// vale para a conexão dele. O som "para o canal" sai pelo microfone, que está
+// num servidor só: de outra conexão ele é recusado.
+func TestScriptsKnowTheirTab(t *testing.T) {
+	app, em := newTestApp(t)
+	sc, err := app.API().SaveScript(ScriptDTO{Name: "teste", Code: "// nada", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := app.current()
+	b := newTab(t, app)
+	up(a)
+	up(b)
+
+	b.onPoke("Leko", "oi")
+	b.onTextMessage(ts3.TextMessage{TargetMode: 2, InvokerID: 3, InvokerName: "Zé", Text: "olá"})
+	b.onClientEvent(ts3.ClientEvent{Kind: ts3.ClientJoined, Client: ts3.ClientInfo{ID: 3, Nickname: "Zé"}, To: 1})
+	seen := map[string]int{}
+	for _, ev := range em.eventsNamed("script:event") {
+		if e := ev.(ScriptEvent); e.Tab == b.id {
+			seen[e.Type]++
+		} else if e.Type != "connected" || e.Tab != a.id {
+			t.Errorf("evento com a aba errada: %+v", e)
+		}
+	}
+	for _, kind := range []string{"connected", "poke", "message", "clientJoined"} {
+		if seen[kind] != 1 {
+			t.Errorf("evento %q da aba B: %d vezes, esperado 1 (%v)", kind, seen[kind], seen)
+		}
+	}
+
+	if _, err := b.api().ScriptCall(sc.ID, "playSound", map[string]any{"name": "Vinheta"}); err != errScriptSoundElsewhere {
+		t.Errorf("som para o canal pedido fora da aba do microfone deveria ser recusado: %v", err)
+	}
+	// na aba do microfone, e só para nós em qualquer aba, o pedido segue (e aqui falha por não haver o som)
+	for _, try := range []struct {
+		c     *conn
+		local bool
+	}{{a, false}, {b, true}} {
+		_, err := try.c.api().ScriptCall(sc.ID, "playSound", map[string]any{"name": "Vinheta", "local": try.local})
+		if err == nil || err == errScriptSoundElsewhere || !strings.Contains(err.Error(), "não há som") {
+			t.Errorf("aba %d, local=%v: %v", try.c.id, try.local, err)
+		}
+	}
+}

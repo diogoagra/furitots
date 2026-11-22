@@ -255,7 +255,7 @@ func (c *conn) onPoke(from, message string) {
 		c.app.emit("poke", PokeDTO{Tab: c.id, Server: c.client.ServerName(), FromName: from, Message: message})
 	}
 	if c.app.scripts.anyEnabled() {
-		c.app.emit("script:event", ScriptEvent{Type: "poke", Text: message, Client: c.scriptSender(0, from, "")})
+		c.app.emit("script:event", ScriptEvent{Tab: c.id, Type: "poke", Text: message, Client: c.scriptSender(0, from, "")})
 	}
 }
 
@@ -578,7 +578,7 @@ func (c *conn) onTextMessage(m ts3.TextMessage) {
 	// respondam a si mesmos.
 	if !msg.Self && c.app.scripts.anyEnabled() {
 		target := map[int]string{1: "private", 2: "channel", 3: "server"}[m.TargetMode]
-		c.app.emit("script:event", ScriptEvent{Type: "message", Text: m.Text, Target: target, Client: c.scriptSender(m.InvokerID, m.InvokerName, m.InvokerUID)})
+		c.app.emit("script:event", ScriptEvent{Tab: c.id, Type: "message", Text: m.Text, Target: target, Client: c.scriptSender(m.InvokerID, m.InvokerName, m.InvokerUID)})
 	}
 }
 

@@ -388,33 +388,41 @@ func TestScriptCallRules(t *testing.T) {
 // Mensagens e cutucadas de scripts têm limite: uma rajada curta e depois um
 // ritmo lento, para o servidor não bloquear o usuário por flood.
 func TestScriptTalkLimit(t *testing.T) {
-	var st scriptStore
-	st.load(filepath.Join(t.TempDir(), "scripts.json"), "")
+	app, _ := newTestApp(t)
+	st := app.current()
 	now := time.Now()
 	for i := 0; i < scriptTalkBurst; i++ {
-		if !st.allowTalk(now) {
+		if !st.allowScriptTalk(now) {
 			t.Fatalf("a mensagem %d da rajada deveria passar", i+1)
 		}
 	}
-	if st.allowTalk(now) || st.allowTalk(now.Add(scriptTalkEvery/2)) {
+	if st.allowScriptTalk(now) || st.allowScriptTalk(now.Add(scriptTalkEvery/2)) {
 		t.Error("depois da rajada, a próxima mensagem deveria esperar")
 	}
 	now = now.Add(scriptTalkEvery/2 + scriptTalkEvery/2 + time.Millisecond)
-	if !st.allowTalk(now) {
+	if !st.allowScriptTalk(now) {
 		t.Error("passado o intervalo, uma mensagem deveria passar")
 	}
-	if st.allowTalk(now) {
+	if st.allowScriptTalk(now) {
 		t.Error("…e só uma")
 	}
 	now = now.Add(time.Hour)
 	passed := 0
 	for i := 0; i < 20; i++ {
-		if st.allowTalk(now) {
+		if st.allowScriptTalk(now) {
 			passed++
 		}
 	}
 	if passed != scriptTalkBurst {
 		t.Errorf("depois de um tempo parado a rajada volta ao tamanho normal, sem acumular: passaram %d", passed)
+	}
+
+	// O bloqueio por flood é de cada servidor: outra conexão tem a sua reserva.
+	other := newTab(t, app)
+	for st.allowScriptTalk(now) {
+	}
+	if !other.allowScriptTalk(now) {
+		t.Error("uma conexão que gastou a reserva não deveria travar as ações em outra")
 	}
 }
 
@@ -739,9 +747,10 @@ func TestLiveScriptModeration(t *testing.T) {
 	}
 	call := func(action string, args map[string]any) error {
 		// o limite contra flood tem teste próprio; aqui cada passo começa com folga
-		admin.scripts.mu.Lock()
-		admin.scripts.talkTokens = scriptTalkBurst
-		admin.scripts.mu.Unlock()
+		c := admin.current()
+		c.talkMu.Lock()
+		c.talkLast = time.Time{} // reserva cheia de novo
+		c.talkMu.Unlock()
 		_, err := api.ScriptCall(sc.ID, action, args)
 		return err
 	}

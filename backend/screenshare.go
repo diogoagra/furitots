@@ -80,6 +80,7 @@ type ScreenDTO struct {
 
 // ScreenSignalDTO é uma mensagem de sinalização recebida de outro cliente.
 type ScreenSignalDTO struct {
+	Tab      int    `json:"tab"` // a conexão (aba) por onde chegou
 	From     int    `json:"from"`
 	FromName string `json:"fromName"`
 	Payload  string `json:"payload"`
@@ -221,7 +222,7 @@ func (c *conn) onPluginCommand(cmd ts3.PluginCommand) {
 	if !ok {
 		return
 	}
-	c.app.emit("screen:signal", ScreenSignalDTO{From: int(cmd.FromID), FromName: cmd.FromName, Payload: payload})
+	c.app.emit("screen:signal", ScreenSignalDTO{Tab: c.id, From: int(cmd.FromID), FromName: cmd.FromName, Payload: payload})
 }
 
 // ---------------------------------------------------------------- captura nativa

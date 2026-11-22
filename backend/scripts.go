@@ -59,6 +59,7 @@ type ScriptDTO struct {
 
 // ScriptEvent é o que um script recebe em ts.on(tipo, …).
 type ScriptEvent struct {
+	Tab     int            `json:"tab"` // a conexão (aba) em que aconteceu
 	Type    string         `json:"type"`
 	Client  *ScriptClient  `json:"client,omitempty"`
 	Channel *ScriptChannel `json:"channel,omitempty"` // o canal do evento (o nosso, nas entradas e saídas)
@@ -125,9 +126,6 @@ type scriptStore struct {
 	list   []ScriptDTO
 	seeded bool // o script de exemplos já foi posto na lista
 
-	talkTokens float64
-	talkLast   time.Time
-
 	soundTokens float64
 	soundLast   time.Time
 }
@@ -144,7 +142,6 @@ type scriptFile struct {
 // desligado; example é o código dele ("" = não há).
 func (st *scriptStore) load(path, example string) {
 	st.path = path
-	st.talkTokens = scriptTalkBurst
 	var f scriptFile
 	data, err := os.ReadFile(path)
 	switch {
@@ -225,21 +222,22 @@ func (st *scriptStore) allowSound(now time.Time) bool {
 	return true
 }
 
-// allowTalk diz se mais uma mensagem ou cutucada de script pode sair agora.
-func (st *scriptStore) allowTalk(now time.Time) bool {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if !st.talkLast.IsZero() {
-		st.talkTokens += float64(now.Sub(st.talkLast)) / float64(scriptTalkEvery)
-		if st.talkTokens > scriptTalkBurst {
-			st.talkTokens = scriptTalkBurst
-		}
+// allowScriptTalk diz se mais uma mensagem, cutucada ou ação de moderação de
+// script pode sair agora por esta conexão. O limite existe por causa do
+// bloqueio por flood, que é de cada servidor: por isso é contado por conexão.
+func (c *conn) allowScriptTalk(now time.Time) bool {
+	c.talkMu.Lock()
+	defer c.talkMu.Unlock()
+	if c.talkLast.IsZero() {
+		c.talkTokens = scriptTalkBurst
+	} else {
+		c.talkTokens = min(scriptTalkBurst, c.talkTokens+float64(now.Sub(c.talkLast))/float64(scriptTalkEvery))
 	}
-	st.talkLast = now
-	if st.talkTokens < 1 {
+	c.talkLast = now
+	if c.talkTokens < 1 {
 		return false
 	}
-	st.talkTokens--
+	c.talkTokens--
 	return true
 }
 
@@ -324,6 +322,7 @@ func (api *API) SetScriptEnabled(id string, on bool) error {
 // scriptEvent entrega um evento aos scripts (se houver algum ligado).
 func (c *conn) scriptEvent(ev ScriptEvent) {
 	if c.app.scripts.anyEnabled() {
+		ev.Tab = c.id
 		c.app.emit("script:event", ev)
 	}
 }
@@ -402,6 +401,7 @@ func (c *conn) onClientEvent(ev ts3.ClientEvent) {
 	default:
 		return
 	}
+	out.Tab = c.id
 	c.app.emit("script:event", out)
 }
 
@@ -485,6 +485,11 @@ func (api *API) ScriptCall(id, action string, args map[string]any) (any, error) 
 	case "playSound":
 		if !a.scripts.allowSound(time.Now()) {
 			return nil, errScriptSoundFlood
+		}
+		// O som "para o canal" sai pelo microfone, que está num servidor só:
+		// pedido por outra conexão, tocaria para as pessoas erradas.
+		if !flag("local") && a.talker() != api.c {
+			return nil, errScriptSoundElsewhere
 		}
 		return nil, a.scriptPlaySound(str("name"), flag("local"))
 	case "stopSound":
@@ -574,7 +579,7 @@ func (c *conn) scriptTalk(send func(), text string, maxRunes int) error {
 	if !c.client.IsConnected() {
 		return errors.New("não conectado")
 	}
-	if !c.app.scripts.allowTalk(time.Now()) {
+	if !c.allowScriptTalk(time.Now()) {
 		return errScriptFlood
 	}
 	send()
@@ -582,8 +587,9 @@ func (c *conn) scriptTalk(send func(), text string, maxRunes int) error {
 }
 
 var (
-	errScriptUnmute     = errors.New("por segurança, um script não liga o microfone nem os alto-falantes: ele só pode mutar; quem desmuta é você")
-	errScriptSoundFlood = fmt.Errorf("muitos sons em pouco tempo: os scripts podem tocar %d seguidos e depois um a cada %d s",
+	errScriptSoundElsewhere = errors.New("o microfone está em outro servidor: daqui o som não chegaria a este canal (use ts.playSoundLocal para ouvir só você)")
+	errScriptUnmute         = errors.New("por segurança, um script não liga o microfone nem os alto-falantes: ele só pode mutar; quem desmuta é você")
+	errScriptSoundFlood     = fmt.Errorf("muitos sons em pouco tempo: os scripts podem tocar %d seguidos e depois um a cada %d s",
 		scriptSoundBurst, int(scriptSoundEvery/time.Second))
 )
 
@@ -620,7 +626,7 @@ func (c *conn) scriptModerate(sc ScriptDTO, clientID int, done string, note func
 			nick = cl.Nickname
 		}
 	}
-	if !c.app.scripts.allowTalk(time.Now()) {
+	if !c.allowScriptTalk(time.Now()) {
 		return errScriptFlood
 	}
 	if err := act(uint16(clientID)); err != nil {
