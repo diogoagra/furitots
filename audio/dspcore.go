@@ -155,6 +155,10 @@ type leveler struct {
 	minGain float64
 	level   float64
 	gain    float64
+
+	// Opcionais; zero mantém o comportamento base.
+	fall   float64 // rapidez com que o ganho desce quando a voz fica mais alta (base: 0,06, a mesma da subida)
+	warmup int     // quadros medidos no começo em que o nível desce mais rápido: acha logo quem fala baixo
 }
 
 func newLeveler(target, minGain, maxGain float64) *leveler {
@@ -174,13 +178,39 @@ func (l *leveler) run(buf []float64, measure bool) {
 		if lvl > l.level {
 			l.level += 0.30 * (lvl - l.level) // sobe rápido: voz mais alta
 		} else {
-			l.level += 0.02 * (lvl - l.level) // desce devagar: pausas entre sílabas
+			down := 0.02 // desce devagar: pausas entre sílabas
+			if l.warmup > 0 {
+				down = 0.10
+			}
+			l.level += down * (lvl - l.level)
+		}
+		if l.warmup > 0 {
+			l.warmup--
 		}
 		want := l.target / math.Max(l.level, 1)
 		want = math.Min(l.maxGain, math.Max(l.minGain, want))
-		l.gain += 0.06 * (want - l.gain)
+		rate := 0.06
+		if want < l.gain && l.fall > 0 {
+			rate = l.fall
+		}
+		l.gain += rate * (want - l.gain)
 	}
 	ramp(buf, prev, l.gain)
+}
+
+// floorTracker acompanha o ruído de fundo de um sinal pelo nível de cada
+// quadro: desce na hora para um quadro mais baixo e sobe devagar (~2 dB/s com
+// quadros de 20 ms). Fica no fundo entre as palavras, não na fala.
+type floorTracker struct{ level float64 }
+
+func (f *floorTracker) update(rms float64) float64 {
+	rms = math.Max(rms, 1)
+	if f.level == 0 || rms < f.level {
+		f.level = rms
+	} else {
+		f.level *= 1.005
+	}
+	return f.level
 }
 
 // ramp aplica um ganho que vai de from a to ao longo do quadro: sem degrau

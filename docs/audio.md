@@ -123,7 +123,10 @@ com correção de erros).
   direito no botão abre a pasta.
 - **Recepção**: buffer de jitter adaptativo por pessoa, reconstrução de pacote
   perdido (FEC/PLC), nivelamento opcional do volume de cada voz e limitador
-  na soma.
+  na soma. O nivelamento sobe até 8× (+18 dB) quem chega baixo e só mede o
+  que fica 8 dB acima do ruído de fundo da própria pessoa: um microfone
+  aberto com ruído e ninguém falando não é amplificado. O volume por pessoa
+  (até 400%) vem depois dele.
 - **Vozes** (`audio/effects.go`):
   - **Tom e "cor" separados.** Mudar o tom reamostrando leva junto os
     formantes (a cor da voz, que vem do tamanho da garganta e da boca), e o

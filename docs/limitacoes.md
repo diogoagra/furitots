@@ -36,4 +36,4 @@ O que o app ainda não faz ou faz com ressalvas. O que está planejado fica em
 - O app de `make mac` depende do `libopus`/`libopusfile` do Homebrew e só roda no Mac em que foi gerado; para levar a outro Mac, `make mac-dist` põe as bibliotecas dentro dele.
 - Fone Bluetooth usado também como microfone: ao abrir o microfone do fone, o macOS o passa para o modo de chamada e todo o som fica com qualidade de telefone. É do Bluetooth, não do app; para manter a qualidade, escolha outro microfone em Ajustes → Áudio.
 - Compartilhamento de tela: só entre clientes Furito (não é compatível com o do cliente TeamSpeak 6), sem áudio do sistema, e a conexão direta revela o IP entre os participantes (ver a seção própria).
-- A versão mostrada pelos clientes oficiais continua a assinada ("3.?.? … Linux"); "Furito TS 1.1.0" só aparece entre clientes Furito.
+- A versão mostrada pelos clientes oficiais continua a assinada ("3.?.? … Linux"); "Furito TS 1.2.0" só aparece entre clientes Furito.

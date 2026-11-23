@@ -13,6 +13,7 @@
   const icon = (name, cls) => `<svg class="ic${cls ? ' ' + cls : ''}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const errText = (e) => (e && e.message ? e.message : String(e == null ? 'erro desconhecido' : e));
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const MAX_CLIENT_VOL = 400; // volume por pessoa, em % (audio.MaxClientGain)
   const pad2 = (n) => (n < 10 ? '0' + n : '' + n);
   const fmtTime = (ms) => { const d = new Date(ms || Date.now()); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()); };
   const debounce = (fn, ms) => { let t = 0; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
@@ -691,7 +692,7 @@
       ? groupList.map((g) => `<div class="ind">${iconHtml({ id: g.iconId, title: g.name })} ${esc(g.name)}</div>`).join('')
       : `<div class="ind">${NONE}</div>`;
     const ch = findChannel(cl.channelId);
-    const vol = clamp(Math.round(cl.volume == null ? 100 : Number(cl.volume) || 0), 0, 200);
+    const vol = clamp(Math.round(cl.volume == null ? 100 : Number(cl.volume) || 0), 0, MAX_CLIENT_VOL);
     const contact = cl.contact === 'friend' ? '<span class="cmark friend">♥</span> Amigo'
       : cl.contact === 'blocked' ? '<span class="cmark blocked">⊘</span> Bloqueado' : NONE;
     return `<div class="info-title">${esc(cl.nickname)}</div>` +
@@ -702,7 +703,7 @@
         (cl.country ? kv('País', flagHtml(cl.country) + ' ' + esc(cl.country)) : '') +
         (away ? kv('Ausente', awayMsg ? esc(awayMsg) : 'sim') : '') +
         (status.length ? kv('Status', esc(status.join(', '))) : '') +
-        (isSelf ? '' : kv('Volume', `<input type="range" class="cl-vol" min="0" max="200" step="1" value="${vol}" data-client="${Number(cl.id)}" title="Volume desta pessoa só para você"><b class="cl-vol-pct">${vol}%</b>` +
+        (isSelf ? '' : kv('Volume', `<input type="range" class="cl-vol" min="0" max="${MAX_CLIENT_VOL}" step="1" value="${vol}" data-client="${Number(cl.id)}" title="Volume desta pessoa só para você"><b class="cl-vol-pct">${vol}%</b>` +
           (cl.mutedLocally ? ' <span class="none">(mutado para mim)</span>' : ''))) +
         (isSelf ? '' : kv('Contato', contact)) +
       '</div>' +
@@ -2279,14 +2280,14 @@
     openDialog({
       title: 'Volume de ' + cl.nickname,
       cls: 'small',
-      body: '<div class="vol-row"><input type="range" class="f-vol" min="0" max="200" step="1"><b class="f-pct"></b></div>' +
+      body: `<div class="vol-row"><input type="range" class="f-vol" min="0" max="${MAX_CLIENT_VOL}" step="1"><b class="f-pct"></b></div>` +
         '<div class="muted-text small">100% é o volume normal; acima disso a voz é amplificada só para você.</div>',
       buttons: [
         { label: '100%', action: (d) => { d.q('.f-vol').value = '100'; d.q('.f-pct').textContent = '100%'; run('SetClientVolume', [cl.id, 100]); } },
         { label: 'Fechar', primary: true },
       ],
       onOpen: (d) => {
-        const v = clamp(Math.round(cl.volume == null ? 100 : cl.volume), 0, 200);
+        const v = clamp(Math.round(cl.volume == null ? 100 : cl.volume), 0, MAX_CLIENT_VOL);
         const slider = d.q('.f-vol');
         slider.value = String(v);
         d.q('.f-pct').textContent = v + '%';
