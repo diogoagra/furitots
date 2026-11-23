@@ -74,6 +74,22 @@ const (
 	VADPTT   = "ptt"   // apertar para falar: transmite enquanto a tecla está apertada
 
 	pttRelease = 5 // quadros (100 ms) transmitidos depois de soltar a tecla
+
+	// Nivelamento das vozes recebidas (SetNormalizeVoices). Alvo um pouco
+	// abaixo do microfone local; sobe no máximo 8× (+18 dB) quem chega baixo e
+	// desce até 0,4× (−8 dB) quem chega alto. Só mede quadros que passam do
+	// silêncio e ficam 8 dB acima do fundo da própria pessoa: o ruído de quem
+	// deixa o microfone aberto calado não é tomado por uma voz baixa.
+	rxLevelTarget = 3000
+	rxMinGain     = 0.4
+	rxMaxGain     = 8
+	rxMeasureMin  = 20  // −64 dBFS
+	rxOverFloor   = 2.5 // +8 dB
+	rxGainFall    = 0.25
+	rxWarmup      = 50 // 1 s de voz medida para achar o nível de quem acabou de começar a falar
+
+	// MaxClientGain é o volume máximo por pessoa (SetClientGain): 4× = 400%.
+	MaxClientGain = 4.0
 )
 
 // voiceKey identifica uma voz recebida. O número do cliente só vale dentro de
@@ -84,8 +100,10 @@ type voiceKey struct {
 }
 
 type stream struct {
-	dec *opus.Decoder // usado só pela goroutine de rede da conexão dele
-	lev *leveler      // idem
+	dec   *opus.Decoder // usado só pela goroutine de rede da conexão dele
+	lev   *leveler      // idem
+	floor floorTracker  // idem
+	lim   *limiter      // idem: o ganho do nivelamento não estoura a amostra de 16 bits
 
 	// protegidos por Engine.rxMu:
 	pcm       []int16
@@ -510,14 +528,14 @@ func (e *Engine) SetBitrate(bps int) {
 // SetPTT informa se a tecla de apertar-para-falar está apertada.
 func (e *Engine) SetPTT(down bool) { e.ptt.Store(down) }
 
-// SetClientGain ajusta o volume de uma pessoa só para nós (1 = normal, 2 = dobro).
-// conn é a conexão em que ela está.
+// SetClientGain ajusta o volume de uma pessoa só para nós (1 = normal, 2 =
+// dobro, até MaxClientGain). conn é a conexão em que ela está.
 func (e *Engine) SetClientGain(conn uint32, id uint16, gain float64) {
-	if gain < 0 {
+	if !(gain >= 0) { // negativo ou NaN
 		gain = 0
 	}
-	if gain > 2 {
-		gain = 2
+	if gain > MaxClientGain {
+		gain = MaxClientGain
 	}
 	key := voiceKey{conn, id}
 	e.rxMu.Lock()
@@ -651,8 +669,9 @@ func (e *Engine) PushVoice(conn uint32, from uint16, seq uint16, opusData []byte
 			e.rxMu.Unlock()
 			return
 		}
-		// alvo um pouco abaixo do microfone local; no máximo +12 dB / -8 dB
-		st = &stream{dec: dec, lev: newLeveler(3000, 0.4, 4), prebuffer: minPrebuffer}
+		lev := newLeveler(rxLevelTarget, rxMinGain, rxMaxGain)
+		lev.fall, lev.warmup = rxGainFall, rxWarmup
+		st = &stream{dec: dec, lev: lev, lim: newLimiter(30000, 80), prebuffer: minPrebuffer}
 		e.streams[key] = st
 		// Aproveita para limpar quem sumiu, de qualquer conexão. Só se olha o
 		// que a trava protege (seen): os outros fluxos podem estar sendo
@@ -717,7 +736,10 @@ func (e *Engine) PushVoice(conn uint32, from uint16, seq uint16, opusData []byte
 	if normalize {
 		buf := make([]float64, len(decoded))
 		toFloat(buf, decoded)
-		st.lev.run(buf, rmsFloat(buf) > 150)
+		lvl := rmsFloat(buf)
+		floor := st.floor.update(lvl)
+		st.lev.run(buf, lvl > rxMeasureMin && lvl > rxOverFloor*floor)
+		st.lim.run(buf)
 		toInt16(decoded, buf)
 	}
 

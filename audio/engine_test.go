@@ -1384,6 +1384,87 @@ func TestNormalizeVoices(t *testing.T) {
 	}
 }
 
+// Quem chega muito baixo (−50 dBFS) também é nivelado — antes ficava abaixo
+// do piso de medição e não subia nada —, mas um microfone aberto só com ruído
+// não é tomado por uma voz baixa. E o volume por pessoa vai até 400%.
+func TestQuietVoicesAndClientGain(t *testing.T) {
+	rng := rand.New(rand.NewSource(3))
+	encode := func(gen func() []float64, n int) [][]byte {
+		enc, _ := opus.NewEncoder(SampleRate, 1, opus.AppVoIP)
+		var out [][]byte
+		for range n {
+			pcm := make([]int16, FrameSize)
+			toInt16(pcm, gen())
+			buf := make([]byte, 1000)
+			k, _ := enc.Encode(pcm, buf)
+			out = append(out, buf[:k])
+		}
+		return out
+	}
+	voice := func(amp float64) [][]byte {
+		v := &voiceSynth{f0: 150, amp: amp}
+		return encode(func() []float64 {
+			f := v.next(FrameSize)
+			for i := range f {
+				f[i] += rng.NormFloat64() * amp / 100 // fundo 40 dB abaixo
+			}
+			return f
+		}, 200) // 4 s
+	}
+	noise := encode(func() []float64 {
+		f := make([]float64, FrameSize)
+		for i := range f {
+			f[i] = rng.NormFloat64() * 100
+		}
+		return f
+	}, 200)
+	play := func(frames [][]byte, normalize bool, gain float64) float64 {
+		e, _ := newTestEngine(t)
+		e.SetNormalizeVoices(normalize)
+		e.SetClientGain(0, 2, gain)
+		out := make([]int16, FrameSize)
+		var sum float64
+		n := 0
+		for i, f := range frames {
+			e.PushVoice(0, 2, uint16(i), f)
+			e.fillPlayback(out)
+			if i >= 150 {
+				sum += rms(out)
+				n++
+			}
+		}
+		return sum / float64(n)
+	}
+
+	// A −51 dBFS, a voz sobe até o teto do nivelamento (8×); o que falta para
+	// chegar às outras fica para o volume por pessoa.
+	quiet, mid, loud := voice(300), voice(1200), voice(9000)
+	quietRaw, quietNorm := play(quiet, false, 1), play(quiet, true, 1)
+	midNorm, loudNorm := play(mid, true, 1), play(loud, true, 1)
+	t.Logf("voz muito baixa: sem nivelar %.0f, nivelada %.0f; voz baixa nivelada %.0f; voz alta nivelada %.0f",
+		quietRaw, quietNorm, midNorm, loudNorm)
+	if quietNorm < quietRaw*rxMaxGain*0.85 {
+		t.Errorf("voz muito baixa deveria subir até %v×: %.0f → %.0f", rxMaxGain, quietRaw, quietNorm)
+	}
+	if loudNorm > midNorm*1.25 || midNorm > loudNorm*1.25 {
+		t.Errorf("voz a −39 dBFS deveria chegar ao nível das outras: %.0f vs %.0f", midNorm, loudNorm)
+	}
+
+	noiseRaw, noiseNorm := play(noise, false, 1), play(noise, true, 1)
+	t.Logf("só ruído: sem nivelar %.0f, nivelado %.0f", noiseRaw, noiseNorm)
+	if noiseNorm > noiseRaw*1.3 {
+		t.Errorf("ruído de microfone aberto foi amplificado: %.0f → %.0f", noiseRaw, noiseNorm)
+	}
+
+	g1, g4, gOver := play(quiet, false, 1), play(quiet, false, 4), play(quiet, false, 10)
+	if r := g4 / g1; r < 3.6 || r > 4.4 {
+		t.Errorf("400%% deu %.2f× o volume normal", r)
+	}
+	if math.Abs(gOver-g4) > g4*0.02 {
+		t.Errorf("acima do máximo deveria ficar em %v×: %.0f vs %.0f", MaxClientGain, gOver, g4)
+	}
+}
+
 // Várias vozes altas somadas não podem estourar nem distorcer por corte.
 func TestMixLimiter(t *testing.T) {
 	e, _ := newTestEngine(t)
