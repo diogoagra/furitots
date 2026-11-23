@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"furito-ts/audio"
 	"furito-ts/ts3"
 )
 
@@ -165,8 +166,8 @@ func (api *API) SetClientVolume(clientID int, percent float64) error {
 	if percent < 0 {
 		percent = 0
 	}
-	if percent > 200 {
-		percent = 200
+	if percent > audio.MaxClientGain*100 {
+		percent = audio.MaxClientGain * 100
 	}
 	api.app.updateSettings(func(s *Settings) {
 		if percent == 100 {

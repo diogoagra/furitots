@@ -10,9 +10,9 @@ e onde ficam os dados.
   Acessibilidade). Limite do sistema: precisa ser uma tecla de função ou uma
   combinação com Ctrl/Alt/Cmd — tecla modificadora sozinha e botão do mouse
   não dá.
-- **Dispositivos de áudio** escolhidos por nome; **volume por pessoa**, "mutar
-  só para mim" e **contatos** (amigo/bloqueado) ficam guardados pela
-  identidade de cada pessoa.
+- **Dispositivos de áudio** escolhidos por nome; **volume por pessoa** (até
+  400%), "mutar só para mim" e **contatos** (amigo/bloqueado) ficam guardados
+  pela identidade de cada pessoa.
 - **Favoritos** e **reconexão automática**: quando a conexão cai, tenta de
   novo com espera crescente e volta ao canal em que você estava; não insiste
   se você foi expulso ou banido.

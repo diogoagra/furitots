@@ -137,7 +137,7 @@ type ClientDTO struct {
 	ChannelGroupID     int        `json:"channelGroupId"`
 
 	// Preferências locais (por identidade do cliente).
-	Volume       float64 `json:"volume"` // 0..200, 100 = normal
+	Volume       float64 `json:"volume"` // 0..400 (audio.MaxClientGain), 100 = normal
 	MutedLocally bool    `json:"mutedLocally"`
 	Contact      string  `json:"contact"` // "" | friend | blocked
 }
