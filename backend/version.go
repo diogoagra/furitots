@@ -12,7 +12,7 @@ import "strings"
 // mostrando a versão assinada.
 const (
 	AppName    = "Furito TS" // nome do app; aparece antes da versão
-	AppVersion = "1.1.0"
+	AppVersion = "1.2.0"
 	AppVendor  = "Diogo Agra"            // autor; aparece na janela Sobre
 	AppSite    = "https://diogoagra.dev" // site do autor
 
