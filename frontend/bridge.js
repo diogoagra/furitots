@@ -1072,7 +1072,7 @@
       SetClientVolume(clientId, percent) {
         const c = findClient(clientId);
         if (!c) return fail('cliente não está mais online');
-        c.volume = Math.max(0, Math.min(200, Math.round(Number(percent) || 0)));
+        c.volume = Math.max(0, Math.min(400, Math.round(Number(percent) || 0)));
         pushState();
         return ok(null);
       },
